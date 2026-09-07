@@ -1,0 +1,22 @@
+{
+  "name": "@convergers-ai/backend",
+  "version": "0.1.0",
+  "description": "Gateway, brain (classifier/router/adapters/normalizer), ledger, and admin-api as internal modules of one deployable service",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@convergers-ai/shared-types": "file:../shared-types",
+    "fastify": "^4.28.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "tsx": "^4.16.2",
+    "@types/node": "^22.5.0"
+  }
+}
