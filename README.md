@@ -19,9 +19,15 @@ native_cost`).
 ## Local development
 
 ```bash
+cp .env.example .env   # add an ANTHROPIC_API_KEY from console.anthropic.com
 npm install
 npm run dev
 ```
 
 Requires `@convergers-ai/shared-types` to be built and linked (or published)
 first — see that repo's README.
+
+Listens on `:8787` by default (see `.env.example` for overrides). Currently
+only the Anthropic adapter is wired up (`brain/adapters/anthropic.ts`); the
+`ledger/` module is an in-memory POC stand-in, not the Postgres-backed
+double-entry ledger from §06.

@@ -1,15 +1,28 @@
 // The Brain: the only part of the system that knows a specific provider
-// exists. Everything outside this module talks to it through the one
-// function below — nothing else imports a provider SDK, formats a
-// provider-specific prompt, or parses a provider-specific response.
+// exists. Everything outside this module talks to it through the functions
+// below — nothing else imports a provider SDK, formats a provider-specific
+// prompt, or parses a provider-specific response.
 //
 // See the technical plan §01 for the full interface contract.
 
 import type { RouteRequest, RouteResponse } from "@convergers-ai/shared-types";
 import { classify } from "./classifier";
-import { route } from "./router";
+import { route, routeStream, type StageEvent } from "./router";
 
-export async function handleRequest(request: RouteRequest): Promise<RouteResponse> {
+export type { StageEvent };
+
+export async function handleRequest(request: RouteRequest, accountId: string): Promise<RouteResponse> {
   const taskType = await classify(request);
-  return route(request, taskType);
+  return route(request, taskType, accountId);
+}
+
+export async function handleStreamRequest(
+  request: RouteRequest,
+  accountId: string,
+  onDelta: (text: string) => void,
+  onStage?: (event: StageEvent) => void
+): Promise<RouteResponse> {
+  const taskType = await classify(request);
+  onStage?.({ stage: "classify", taskType });
+  return routeStream(request, taskType, accountId, onDelta, onStage);
 }

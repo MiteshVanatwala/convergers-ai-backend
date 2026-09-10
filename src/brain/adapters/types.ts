@@ -10,4 +10,6 @@ export interface ProviderResponse {
 export interface ProviderAdapter {
   id: string;
   call(request: RouteRequest): Promise<ProviderResponse>;
+  /** Same call, but invokes `onDelta` with each text chunk as it arrives. */
+  streamCall(request: RouteRequest, onDelta: (text: string) => void): Promise<ProviderResponse>;
 }

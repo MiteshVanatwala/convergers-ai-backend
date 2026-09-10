@@ -1,6 +1,8 @@
+import "dotenv/config";
 import { buildServer } from "./gateway";
 
-const port = Number(process.env.PORT ?? 3000);
+// Distinct from web's default dev port (3000) so both can run side by side.
+const port = Number(process.env.PORT ?? 8787);
 
 buildServer()
   .listen({ port, host: "0.0.0.0" })

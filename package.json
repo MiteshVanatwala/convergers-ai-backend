@@ -11,12 +11,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
     "@convergers-ai/shared-types": "file:../shared-types",
-    "fastify": "^4.28.1"
+    "@fastify/cors": "^9.0.1",
+    "dotenv": "^17.4.2",
+    "fastify": "^4.28.1",
+    "openai": "^7.13.0"
   },
   "devDependencies": {
-    "typescript": "^5.5.4",
+    "@types/node": "^22.5.0",
     "tsx": "^4.16.2",
-    "@types/node": "^22.5.0"
+    "typescript": "^5.5.4"
   }
 }
