@@ -4,7 +4,7 @@ import type { ProviderAdapter, ProviderResponse } from "../adapters/types";
 import { haikuAdapter, sonnetAdapter } from "../adapters/anthropic";
 import { openaiImageAdapter } from "../adapters/openai";
 import { normalize } from "../normalizer";
-import { creditsForCost, debit } from "../../ledger";
+import { creditsForCost, debit } from "../../ledger/ledger.service";
 import * as usageLog from "../usageLog";
 
 /**
