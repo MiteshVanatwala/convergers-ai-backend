@@ -10,6 +10,12 @@
 -- against a real environment, revoke UPDATE/DELETE on credit_ledger and
 -- admin_audit_log for the application role — both are append-only by
 -- policy, and the policy only means something if the database enforces it.
+--
+-- CREATE DATABASE cannot run inside a transaction. Connect to the default
+-- `postgres` database first, then reconnect after this statement.
+
+CREATE DATABASE convergers_ai;
+\c convergers_ai
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto; -- gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS citext;   -- case-insensitive email columns
