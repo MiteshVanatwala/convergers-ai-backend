@@ -5,15 +5,20 @@
 // no live traffic routes to it yet — that needs per-client auth on the
 // gateway, which this POC doesn't have.
 
+// Plan slugs match the product plan's billing tiers (pay-as-you-go / growth
+// / scale), not a generic free/pro/enterprise SaaS ladder — this product
+// bills by credits, and these names describe how, not a feature gate.
+// "Free" isn't a fourth plan: a brand-new pay_as_you_go account simply
+// hasn't bought a pack yet.
 export interface Client {
   id: string;
   name: string;
   email: string;
-  plan: "free" | "pro" | "enterprise";
+  plan: "pay_as_you_go" | "growth" | "scale";
   createdAt: Date;
 }
 
-export const PLANS = ["free", "pro", "enterprise"] as const;
+export const PLANS = ["pay_as_you_go", "growth", "scale"] as const;
 
 const clients = new Map<string, Client>();
 
@@ -21,7 +26,7 @@ clients.set("demo", {
   id: "demo",
   name: "Demo / Playground",
   email: "demo@convergers.ai",
-  plan: "free",
+  plan: "pay_as_you_go",
   createdAt: new Date(),
 });
 

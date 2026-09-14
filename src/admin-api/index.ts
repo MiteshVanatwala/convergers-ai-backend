@@ -31,7 +31,7 @@ export async function registerAdminApi(app: FastifyInstance) {
     const requestedPlan = request.body?.plan;
     const plan: Client["plan"] = (clients.PLANS as readonly string[]).includes(requestedPlan ?? "")
       ? (requestedPlan as Client["plan"])
-      : "free";
+      : "pay_as_you_go";
     const client = clients.create({ name, email, plan });
     reply.status(201);
     return serializeClient(client);
