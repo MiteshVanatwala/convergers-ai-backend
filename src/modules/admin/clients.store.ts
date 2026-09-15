@@ -1,6 +1,8 @@
 // In-memory client registry — POC stand-in for a real customers table.
 // "demo" is the account the web playground bills against until per-user auth billing lands.
 
+import { randomUUID } from "crypto";
+
 export interface Client {
   id: string;
   name: string;
@@ -30,7 +32,7 @@ export function getClient(id: string): Client | undefined {
 }
 
 export function createClient(input: { name: string; email: string; plan: Client["plan"] }): Client {
-  const id = crypto.randomUUID();
+  const id = randomUUID();
   const client: Client = { id, ...input, createdAt: new Date() };
   clients.set(id, client);
   return client;

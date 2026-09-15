@@ -33,7 +33,10 @@ export async function route(
   try {
     return await handleRequest(request.body, account.id);
   } catch (err) {
-    request.log.error(err);
+    request.log.error(
+      { err },
+      `[routing.controller.route] ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`
+    );
     return reply.status(502).send({
       error: "upstream_failure",
       message: err instanceof Error ? err.message : String(err),
@@ -82,7 +85,10 @@ export async function routeStream(
     );
     send("done", result);
   } catch (err) {
-    request.log.error(err);
+    request.log.error(
+      { err },
+      `[routing.controller.routeStream] ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`
+    );
     send("error", { message: err instanceof Error ? err.message : String(err) });
   } finally {
     res.end();

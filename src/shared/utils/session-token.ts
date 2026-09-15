@@ -17,6 +17,12 @@ export function sessionCookieName(): string {
   return loadEnv().sessionCookieName;
 }
 
+/** Secure is required whenever SameSite=None (browsers reject None without Secure). */
+export function cookieShouldBeSecure(): boolean {
+  const env = loadEnv();
+  return env.cookieSecure || env.cookieSameSite === "None";
+}
+
 export function buildSessionCookie(token: string): string {
   const env = loadEnv();
   const maxAge = env.sessionTtlDays * 86400;
@@ -24,17 +30,23 @@ export function buildSessionCookie(token: string): string {
     `${env.sessionCookieName}=${token}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
+    `SameSite=${env.cookieSameSite}`,
     `Max-Age=${maxAge}`,
   ];
-  if (env.cookieSecure) parts.push("Secure");
+  if (cookieShouldBeSecure()) parts.push("Secure");
   return parts.join("; ");
 }
 
 export function clearSessionCookie(): string {
   const env = loadEnv();
-  const parts = [`${env.sessionCookieName}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
-  if (env.cookieSecure) parts.push("Secure");
+  const parts = [
+    `${env.sessionCookieName}=`,
+    "Path=/",
+    "HttpOnly",
+    `SameSite=${env.cookieSameSite}`,
+    "Max-Age=0",
+  ];
+  if (cookieShouldBeSecure()) parts.push("Secure");
   return parts.join("; ");
 }
 

@@ -154,17 +154,17 @@ export async function createSession(input: {
   try {
     const pool = getPool();
     const ttlDays: number = loadEnv().sessionTtlDays;
-    const createParams: [string, string, string, string, string | null, string | null] = [
+    const createParams: [string, string, string, number, string | null, string | null] = [
       input.accountId,
       hashToken(input.token),
       input.audience ?? "web",
-      String(ttlDays),
+      ttlDays,
       input.ip ?? null,
       input.userAgent ?? null,
     ];
     const result: QueryResult<{ id: string }> = await pool.query<{ id: string }>(
       `INSERT INTO sessions (account_id, token_hash, audience, expires_at, ip_address, user_agent)
-       VALUES ($1, $2, $3, now() + ($4 || ' days')::interval, $5::inet, $6)
+       VALUES ($1, $2, $3, now() + ($4::int * interval '1 day'), $5::inet, $6)
        RETURNING id`,
       createParams
     );
@@ -240,7 +240,7 @@ export async function revokeSession(token: string): Promise<void> {
 export async function updateProfileName(
   accountId: string,
   name: string | null
-): Promise<SessionAccount | null> {
+): Promise<AccountRow | null> {
   try {
     const pool = getPool();
     const result: QueryResult<AccountRow> = await pool.query<AccountRow>(
@@ -252,9 +252,7 @@ export async function updateProfileName(
        RETURNING id, email, name, avatar_url, auth_provider, status, created_at`,
       [accountId, name]
     );
-    const row = result.rows[0];
-    if (!row) return null;
-    return { ...row, session_id: "" };
+    return result.rows[0] ?? null;
   } catch (error: unknown) {
     logCaught("auth.service.updateProfileName", error);
     throw error;

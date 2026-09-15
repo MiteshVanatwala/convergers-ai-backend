@@ -33,3 +33,17 @@ pnpm run dev
 ```
 
 Requires `@convergers-ai/shared-types` built/linked. Default port `:8787`.
+
+Auth, sessions, and admin DB features need Postgres. Set `DATABASE_URL` in `.env`
+(see `.env.example`); the first DB call fails with a clear error if it is missing.
+
+Session cookie defaults: `SameSite=Lax`, `Secure` only when `COOKIE_SECURE=true`.
+For cross-site deployments (web and API on different sites), set `COOKIE_SAMESITE=None`
+(Secure is forced). Keep Lax for localhost / same-site Google OAuth.
+
+`/admin/*` (except `/admin/health`) requires a valid session cookie **and** an active row in `admin_users` matching the account email. Seed one before using the admin panel:
+
+```sql
+INSERT INTO admin_users (email, role, status)
+VALUES ('you@example.com', 'engineering_admin', 'active');
+```

@@ -1,6 +1,8 @@
 import { loadEnv, primaryWebOrigin } from "../../config/env";
 import type { GoogleUserInfo } from "./types";
 
+const GOOGLE_FETCH_TIMEOUT_MS = 10_000;
+
 export type GoogleOAuthConfig = {
   clientId: string;
   clientSecret: string;
@@ -32,35 +34,54 @@ export function buildGoogleAuthorizeUrl(clientId: string, redirectUri: string, s
   return url.toString();
 }
 
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "AbortError" || error.name === "TimeoutError";
+}
+
 export async function exchangeCodeForAccessToken(
   code: string,
   config: GoogleOAuthConfig
 ): Promise<{ accessToken: string } | { error: string }> {
-  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      code,
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      redirect_uri: config.redirectUri,
-      grant_type: "authorization_code",
-    }),
-  });
-  const tokenJson = (await tokenRes.json()) as {
-    access_token?: string;
-    error?: string;
-  };
-  if (!tokenRes.ok || !tokenJson.access_token) {
-    return { error: tokenJson.error ?? "exchange_failed" };
+  try {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        redirect_uri: config.redirectUri,
+        grant_type: "authorization_code",
+      }),
+      signal: AbortSignal.timeout(GOOGLE_FETCH_TIMEOUT_MS),
+    });
+    const tokenJson = (await tokenRes.json()) as {
+      access_token?: string;
+      error?: string;
+    };
+    if (!tokenRes.ok || !tokenJson.access_token) {
+      return { error: tokenJson.error ?? "exchange_failed" };
+    }
+    return { accessToken: tokenJson.access_token };
+  } catch (error: unknown) {
+    if (isAbortError(error)) {
+      return { error: "exchange_failed" };
+    }
+    throw error;
   }
-  return { accessToken: tokenJson.access_token };
 }
 
 export async function fetchGoogleUserInfo(accessToken: string): Promise<GoogleUserInfo | null> {
-  const profileRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!profileRes.ok) return null;
-  return (await profileRes.json()) as GoogleUserInfo;
+  try {
+    const profileRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(GOOGLE_FETCH_TIMEOUT_MS),
+    });
+    if (!profileRes.ok) return null;
+    return (await profileRes.json()) as GoogleUserInfo;
+  } catch (error: unknown) {
+    if (isAbortError(error)) return null;
+    throw error;
+  }
 }

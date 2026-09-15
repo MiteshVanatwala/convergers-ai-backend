@@ -1,3 +1,5 @@
+export type CookieSameSite = "Lax" | "None" | "Strict";
+
 export type Env = {
   port: number;
   databaseUrl: string | undefined;
@@ -9,6 +11,7 @@ export type Env = {
   sessionCookieName: string;
   sessionTtlDays: number;
   cookieSecure: boolean;
+  cookieSameSite: CookieSameSite;
   /** @deprecated Shared POC pool only — authenticated users use per-user wallets. */
   demoStartingCredits: number;
   /** Credits granted once on brand-new account create. Changing this does not rewrite past ledger rows. */
@@ -25,6 +28,20 @@ function nonNegativeInt(raw: string | undefined, fallback: number): number {
   return Math.floor(parsed);
 }
 
+/** Positive integer ≥ 1 (session TTL days, etc.). */
+function positiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw ?? fallback);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.floor(parsed);
+}
+
+function parseCookieSameSite(raw: string | undefined): CookieSameSite {
+  const normalized = (raw ?? "Lax").trim().toLowerCase();
+  if (normalized === "none") return "None";
+  if (normalized === "strict") return "Strict";
+  return "Lax";
+}
+
 /** Read process env into a typed object. Does not throw on missing Google/DB — callers decide. */
 export function loadEnv(): Env {
   return {
@@ -37,8 +54,9 @@ export function loadEnv(): Env {
     googleRedirectUri:
       process.env.GOOGLE_REDIRECT_URI?.trim() || "http://localhost:8787/auth/google/callback",
     sessionCookieName: process.env.SESSION_COOKIE_NAME?.trim() || "convergers_session",
-    sessionTtlDays: Number(process.env.SESSION_TTL_DAYS ?? 14),
+    sessionTtlDays: positiveInt(process.env.SESSION_TTL_DAYS, 14),
     cookieSecure: process.env.COOKIE_SECURE === "true",
+    cookieSameSite: parseCookieSameSite(process.env.COOKIE_SAMESITE),
     demoStartingCredits: nonNegativeInt(process.env.DEMO_STARTING_CREDITS, 100_000),
     signupGrantCredits: nonNegativeInt(process.env.SIGNUP_GRANT_CREDITS, 100),
   };

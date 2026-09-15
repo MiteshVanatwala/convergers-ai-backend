@@ -2,6 +2,8 @@
 // the admin dashboard's stats; the request path (router/index.ts) writes to
 // it, nothing in the request path reads from it.
 
+import { randomUUID } from "crypto";
+
 export interface UsageEvent {
   id: string;
   accountId: string;
@@ -21,7 +23,7 @@ const MAX_EVENTS = 2000; // bounds memory growth for a long-running dev process
 const events: UsageEvent[] = [];
 
 export function record(event: Omit<UsageEvent, "id" | "createdAt">): void {
-  events.push({ ...event, id: crypto.randomUUID(), createdAt: new Date() });
+  events.push({ ...event, id: randomUUID(), createdAt: new Date() });
   if (events.length > MAX_EVENTS) events.shift();
 }
 
