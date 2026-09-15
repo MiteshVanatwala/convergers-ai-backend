@@ -1,33 +1,49 @@
 # backend
 
-Gateway, Brain, ledger, and admin-api — one deployable service (a modular
-monolith, per the technical plan §07/§08), split into internal modules:
+Gateway, Brain, ledger, and admin-api — one deployable service (modular monolith).
+
+## Layout
 
 ```
 src/
-  gateway/     → auth, rate limiting, HTTP entrypoint
-  brain/       → classifier, router, adapters, normalizer
-  ledger/      → billing, credits
-  admin-api/   → internal tooling backend
+  config/              env + constants
+  infrastructure/      db pool, Fastify server, middleware
+  modules/
+    auth/              routes · controller · service (DB) · google.oauth
+    health/
+    routing/           /v1/*
+    ledger/            ledger.service (data)
+    brain/             domain (classifier, router, adapters)
+    admin/
+  shared/              utils, errors
 ```
 
-Only `brain/` imports provider SDKs. Everything else calls it through the
-single function in `brain/index.ts` — see the technical plan §01 for the
-full interface contract (`request + policy flags → provider_used, usage,
-native_cost`).
+SQL migrations live in package-root `db/` (`schema.sql`, `rls.sql`, `google_auth.sql`).
+
+Signup credits: set `SIGNUP_GRANT_CREDITS` (default 100). Uses existing `credit_wallets` + `credit_ledger` from `schema.sql`. See [`Docs/backend-plan/19-signup-credit-grants.md`](../Docs/backend-plan/19-signup-credit-grants.md).
+
+Conventions: [AGENTS.md](./AGENTS.md) · Delplus adoption: [`Docs/backend-plan/18-delplus-rules-adoption.md`](../Docs/backend-plan/18-delplus-rules-adoption.md).
 
 ## Local development
 
 ```bash
-cp .env.example .env   # add an ANTHROPIC_API_KEY from console.anthropic.com
-npm install
-npm run dev
+cp .env.example .env
+pnpm install
+pnpm run dev
 ```
 
-Requires `@convergers-ai/shared-types` to be built and linked (or published)
-first — see that repo's README.
+Requires `@convergers-ai/shared-types` built/linked. Default port `:8787`.
 
-Listens on `:8787` by default (see `.env.example` for overrides). Currently
-only the Anthropic adapter is wired up (`brain/adapters/anthropic.ts`); the
-`ledger/` module is an in-memory POC stand-in, not the Postgres-backed
-double-entry ledger from §06.
+Auth, sessions, and admin DB features need Postgres. Set `DATABASE_URL` in `.env`
+(see `.env.example`); the first DB call fails with a clear error if it is missing.
+
+Session cookie defaults: `SameSite=Lax`, `Secure` only when `COOKIE_SECURE=true`.
+For cross-site deployments (web and API on different sites), set `COOKIE_SAMESITE=None`
+(Secure is forced). Keep Lax for localhost / same-site Google OAuth.
+
+`/admin/*` (except `/admin/health`) requires a valid session cookie **and** an active row in `admin_users` matching the account email. Seed one before using the admin panel:
+
+```sql
+INSERT INTO admin_users (email, role, status)
+VALUES ('you@example.com', 'engineering_admin', 'active');
+```
