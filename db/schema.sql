@@ -199,15 +199,18 @@ CREATE TABLE projects (
   name         text NOT NULL,
   color        text,
   archived     boolean NOT NULL DEFAULT false,
-  created_at   timestamptz NOT NULL DEFAULT now()
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_projects_account ON projects (account_id);
 
 CREATE TABLE conversations (
-  id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id       uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   project_id       bigint REFERENCES projects(id) ON DELETE SET NULL,
   title            text,
+  title_status     text NOT NULL DEFAULT 'pending'
+                     CHECK (title_status IN ('pending', 'generated', 'manual')),
   pinned           boolean NOT NULL DEFAULT false,
   archived         boolean NOT NULL DEFAULT false,
   last_message_at  timestamptz NOT NULL DEFAULT now(),
@@ -215,32 +218,52 @@ CREATE TABLE conversations (
 );
 -- Powers the recent-chats sidebar: one index serves the sort AND the filter.
 CREATE INDEX idx_conversations_account_recent
-  ON conversations (account_id, pinned DESC, last_message_at DESC);
+  ON conversations (account_id, pinned DESC, last_message_at DESC)
+  WHERE archived = false;
 CREATE INDEX idx_conversations_project ON conversations (project_id);
+CREATE INDEX idx_conversations_account_recents
+  ON conversations (account_id, last_message_at DESC, id DESC)
+  WHERE archived = false AND pinned = false AND project_id IS NULL;
 
 CREATE TABLE messages (
-  id               bigint GENERATED ALWAYS AS IDENTITY,
-  conversation_id  bigint NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  account_id       uuid NOT NULL REFERENCES accounts(id), -- denormalized from conversations: RLS on this table needs a direct equality check, not a per-row join
-  role             text NOT NULL,          -- user | assistant
-  content          text NOT NULL,
-  content_search   tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
-  provider         text,
-  task_type        text,
-  tokens_input     integer,
-  tokens_output    integer,
-  credits_charged  numeric(12,2),
-  created_at       timestamptz NOT NULL DEFAULT now(),
+  id                 bigint GENERATED ALWAYS AS IDENTITY,
+  conversation_id    uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  account_id         uuid NOT NULL REFERENCES accounts(id), -- denormalized from conversations: RLS on this table needs a direct equality check, not a per-row join
+  role               text NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  content            text NOT NULL,
+  content_search     tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+  provider           text,
+  task_type          text,
+  tokens_input       integer,
+  tokens_output      integer,
+  credits_charged    numeric(12,2),
+  status             text NOT NULL DEFAULT 'complete'
+                       CHECK (status IN ('complete', 'error', 'cancelled')),
+  client_message_id  uuid,
+  created_at         timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 CREATE INDEX idx_messages_conversation ON messages (conversation_id, created_at);
 CREATE INDEX idx_messages_account ON messages (account_id, created_at DESC);
 CREATE INDEX idx_messages_search ON messages USING GIN (content_search);
+CREATE INDEX idx_messages_client_message
+  ON messages (account_id, client_message_id)
+  WHERE client_message_id IS NOT NULL;
 
 CREATE TABLE messages_2026_09 PARTITION OF messages
   FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
 CREATE TABLE messages_2026_10 PARTITION OF messages
   FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+CREATE TABLE messages_2026_11 PARTITION OF messages
+  FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+CREATE TABLE messages_2026_12 PARTITION OF messages
+  FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
+CREATE TABLE messages_2027_01 PARTITION OF messages
+  FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+CREATE TABLE messages_2027_02 PARTITION OF messages
+  FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
+CREATE TABLE messages_2027_03 PARTITION OF messages
+  FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
 
 CREATE TABLE labels (
   id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -250,7 +273,7 @@ CREATE TABLE labels (
 );
 
 CREATE TABLE conversation_labels (
-  conversation_id  bigint NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  conversation_id  uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   label_id         bigint NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
   PRIMARY KEY (conversation_id, label_id)
 );
@@ -270,7 +293,7 @@ CREATE INDEX idx_feedback_message ON message_feedback (message_id);
 CREATE TABLE orchestration_state (
   id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id       uuid NOT NULL REFERENCES accounts(id),
-  conversation_id  bigint NOT NULL REFERENCES conversations(id),
+  conversation_id  uuid NOT NULL REFERENCES conversations(id),
   plan             jsonb NOT NULL,        -- ordered steps, e.g. [{step: 'write_post'}, {step: 'generate_cover_image'}]
   completed_steps  integer NOT NULL DEFAULT 0,
   status           text NOT NULL DEFAULT 'in_progress', -- in_progress | done | failed
@@ -341,7 +364,7 @@ CREATE TABLE provider_routing_rules (
 CREATE TABLE usage_events (
   id               bigint GENERATED ALWAYS AS IDENTITY,
   account_id       uuid NOT NULL REFERENCES accounts(id),
-  conversation_id  bigint,
+  conversation_id  uuid,
   message_id       bigint,
   task_type        text NOT NULL,
   provider         text NOT NULL,
@@ -364,6 +387,16 @@ CREATE TABLE usage_events_2026_09 PARTITION OF usage_events
   FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
 CREATE TABLE usage_events_2026_10 PARTITION OF usage_events
   FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+CREATE TABLE usage_events_2026_11 PARTITION OF usage_events
+  FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+CREATE TABLE usage_events_2026_12 PARTITION OF usage_events
+  FOR VALUES FROM ('2026-12-01') TO ('2027-01-01');
+CREATE TABLE usage_events_2027_01 PARTITION OF usage_events
+  FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+CREATE TABLE usage_events_2027_02 PARTITION OF usage_events
+  FOR VALUES FROM ('2027-02-01') TO ('2027-03-01');
+CREATE TABLE usage_events_2027_03 PARTITION OF usage_events
+  FOR VALUES FROM ('2027-03-01') TO ('2027-04-01');
 
 CREATE TABLE feature_flags (
   id                    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -392,9 +425,13 @@ CREATE TABLE moderation_queue (
 CREATE TABLE admin_users (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email           citext NOT NULL UNIQUE,
+  username        citext UNIQUE,           -- password login id (admin panel); null until admin_auth.sql / seed
+  password_hash   text,                    -- scrypt / bcrypt hash — never plain
   role            text NOT NULL,          -- support | ops_business | engineering_admin
   status          text NOT NULL DEFAULT 'active', -- active | deactivated
   invited_by      uuid REFERENCES admin_users(id),
+  password_changed_at timestamptz,
+  last_login_at   timestamptz,
   created_at      timestamptz NOT NULL DEFAULT now(),
   deactivated_at  timestamptz
 );

@@ -146,10 +146,14 @@ export async function getBalance(accountId: string, client?: PoolClient): Promis
 /**
  * Debits up to `credits` from the account, clamping at zero.
  * Real accounts use Postgres; non-UUID admin POC ids stay in-memory.
+ *
+ * Prefer `usage.service.recordSuccessAndDebit` for AI spend so a usage_events
+ * row and ledger.reference_id are written in the same transaction.
  */
 export async function debit(
   accountId: string,
-  credits: number
+  credits: number,
+  options?: { referenceId?: string | null; client?: PoolClient }
 ): Promise<{ charged: number; balance: number }> {
   try {
     if (!isAccountUuid(accountId)) {
@@ -160,7 +164,7 @@ export async function debit(
       return { charged, balance };
     }
 
-    return await withPoolTransaction(async (client: PoolClient) => {
+    const run = async (client: PoolClient): Promise<{ charged: number; balance: number }> => {
       await ensureWallet(accountId, client);
       const locked: QueryResult<{ balance: string }> = await runQuery(
         client,
@@ -175,9 +179,16 @@ export async function debit(
         await runQuery(
           client,
           `INSERT INTO credit_ledger (
-             account_id, amount, reason, balance_after, reference_type
-           ) VALUES ($1, $2, $3, $4, $5)`,
-          [accountId, -charged, LedgerReason.DEBIT, balance, LedgerReferenceType.USAGE_EVENT]
+             account_id, amount, reason, balance_after, reference_type, reference_id
+           ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            accountId,
+            -charged,
+            LedgerReason.DEBIT,
+            balance,
+            LedgerReferenceType.USAGE_EVENT,
+            options?.referenceId ?? null,
+          ]
         );
         await runQuery(
           client,
@@ -189,7 +200,13 @@ export async function debit(
       }
 
       return { charged, balance };
-    });
+    };
+
+    if (options?.client) {
+      return run(options.client);
+    }
+
+    return await withPoolTransaction(run);
   } catch (error: unknown) {
     logCaught("ledger.service.debit", error);
     throw error;
