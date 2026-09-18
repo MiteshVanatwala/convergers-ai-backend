@@ -27,7 +27,7 @@ CREATE EXTENSION IF NOT EXISTS citext;   -- case-insensitive email columns
 
 CREATE TABLE plans (
   id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  key               text NOT NULL UNIQUE, -- 'pay_as_you_go' | 'growth' | 'scale' — stable, never renamed
+  key               text NOT NULL UNIQUE, -- 'free' | 'pro' | 'pay_as_you_go' | 'enterprise' — stable, never renamed (see db/commercial_plans_v1.sql)
   display_name      text NOT NULL,        -- editable by marketing without touching the key
   price_usd_cents   integer,
   included_credits  integer,
@@ -52,6 +52,31 @@ CREATE TABLE accounts (
   updated_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_accounts_status ON accounts (status);
+
+-- Account ↔ plan membership (current + history). Prefer this over accounts.plan_id.
+-- Seed/backfill: db/commercial_plans_v1.sql then db/account_plans_v1.sql
+CREATE TABLE account_plans (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id      uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  plan_id         bigint NOT NULL REFERENCES plans(id),
+  status          text NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'canceled', 'expired', 'pending')),
+  source          text NOT NULL DEFAULT 'signup'
+                    CHECK (source IN ('signup', 'self_serve', 'admin', 'stripe', 'migration')),
+  started_at      timestamptz NOT NULL DEFAULT now(),
+  ends_at         timestamptz,
+  canceled_at     timestamptz,
+  external_ref    text,
+  meta            jsonb NOT NULL DEFAULT '{}',
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uniq_account_plans_one_active
+  ON account_plans (account_id)
+  WHERE status = 'active';
+CREATE INDEX idx_account_plans_account_started
+  ON account_plans (account_id, started_at DESC);
+CREATE INDEX idx_account_plans_plan ON account_plans (plan_id);
 
 CREATE TABLE login_events (
   id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

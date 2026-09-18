@@ -12,6 +12,7 @@ import {
 import { logCaught } from "../../shared/utils/log";
 import * as authService from "./auth.service";
 import type { AccountRow, SessionAccount } from "./types";
+import * as plansService from "../plans/plans.service";
 import type { GoogleOAuthConfig } from "./google.oauth";
 import {
   buildGoogleAuthorizeUrl,
@@ -143,7 +144,7 @@ export async function me(request: FastifyRequest, reply: FastifyReply) {
       reply.header("Set-Cookie", clearSessionCookie());
       return fail(reply, AppStatus.AUTH_UNAUTHORIZED, "Unauthorized", 401);
     }
-    return ok(reply, AppStatus.AUTH_ME_RETRIEVED, mapMe(account));
+    return ok(reply, AppStatus.AUTH_ME_RETRIEVED, await mapMe(account));
   } catch (error: unknown) {
     request.log.error(
       { err: error },
@@ -155,7 +156,7 @@ export async function me(request: FastifyRequest, reply: FastifyReply) {
 
 const NAME_MAX_LEN = 100;
 
-function mapMe(account: {
+async function mapMe(account: {
   id: string;
   email: string;
   name: string | null;
@@ -163,6 +164,7 @@ function mapMe(account: {
   auth_provider: string;
   created_at: Date;
 }) {
+  const membership = await plansService.getOrEnsureActivePlan(account.id);
   return {
     id: account.id,
     email: account.email,
@@ -170,6 +172,7 @@ function mapMe(account: {
     pictureUrl: account.avatar_url,
     authProvider: account.auth_provider,
     createdAt: account.created_at.toISOString(),
+    plan: plansService.mapAuthPlan(membership),
   };
 }
 
@@ -216,7 +219,7 @@ export async function updateMe(
       return fail(reply, AppStatus.AUTH_UNAUTHORIZED, "Unauthorized", 401);
     }
 
-    return ok(reply, AppStatus.AUTH_PROFILE_UPDATED, mapMe(updated));
+    return ok(reply, AppStatus.AUTH_PROFILE_UPDATED, await mapMe(updated));
   } catch (error: unknown) {
     logCaught("auth.controller.updateMe", error);
     request.log.error(

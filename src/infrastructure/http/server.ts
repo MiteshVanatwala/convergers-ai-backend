@@ -7,6 +7,7 @@ import { registerAdminRoutes } from "../../modules/admin/admin.routes";
 import { registerConversationRoutes } from "../../modules/conversations/conversations.routes";
 import { registerProjectRoutes } from "../../modules/projects/projects.routes";
 import { registerUsageRoutes } from "../../modules/usage/usage.routes";
+import { registerPlanRoutes } from "../../modules/plans/plans.routes";
 
 export async function buildServer() {
   const app = Fastify({ logger: true });
@@ -19,6 +20,7 @@ export async function buildServer() {
   registerConversationRoutes(app);
   registerProjectRoutes(app);
   registerUsageRoutes(app);
+  registerPlanRoutes(app);
   registerAdminRoutes(app);
 
   return app;

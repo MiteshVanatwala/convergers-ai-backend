@@ -14,14 +14,17 @@ src/
     routing/           /v1/*
     ledger/            ledger.service (data)
     usage/             usage_events persist + /v1/usage/* (list/summary/export)
+    plans/             commercial catalog GET /v1/plans + account_plans membership
     brain/             domain (classifier, router, adapters)
     admin/
   shared/              utils, errors
 ```
 
-SQL migrations live in package-root `db/` (`schema.sql`, `rls.sql`, `google_auth.sql`, `admin_auth.sql`, `admin_management.sql`, `usage_events_partitions_v1.sql`).
+SQL migrations live in package-root `db/` (`schema.sql`, `rls.sql`, `google_auth.sql`, `admin_auth.sql`, `admin_management.sql`, `usage_events_partitions_v1.sql`, `commercial_plans_v1.sql`, `account_plans_v1.sql`).
 
 Signup credits: set `SIGNUP_GRANT_CREDITS` (default 100). Uses existing `credit_wallets` + `credit_ledger` from `schema.sql`. See [`Docs/backend-plan/19-signup-credit-grants.md`](../Docs/backend-plan/19-signup-credit-grants.md).
+
+Commercial plans (Option E): seed catalog with `db/commercial_plans_v1.sql`, then membership table + Free backfill with `db/account_plans_v1.sql`. New signups get an active Free `account_plans` row. APIs: `GET /v1/plans`, `GET /auth/me` includes `plan`. See [`Docs/commercial-plans/02-pricing-modal-web.md`](../Docs/commercial-plans/02-pricing-modal-web.md).
 
 Usage events: every brain success/error writes `usage_events`; successful charges set `credit_ledger.reference_id`. Consumer APIs: `GET /v1/usage/events`, `/v1/usage/summary`, `/v1/usage/export`. See [`Docs/backend-plan/22-usage-events-persistence.md`](../Docs/backend-plan/22-usage-events-persistence.md).
 
