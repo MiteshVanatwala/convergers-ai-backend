@@ -13,6 +13,10 @@ export interface ProviderInfo {
 export const PROVIDERS: ProviderInfo[] = [
   { id: "anthropic", label: "Anthropic", envVar: "ANTHROPIC_API_KEY" },
   { id: "openai", label: "OpenAI", envVar: "OPENAI_API_KEY" },
+  { id: "deepseek", label: "DeepSeek", envVar: "DEEPSEEK_API_KEY" },
+  { id: "glm", label: "GLM (Zhipu)", envVar: "GLM_API_KEY" },
+  { id: "kimi", label: "Kimi (Moonshot)", envVar: "KIMI_API_KEY" },
+  { id: "groq", label: "Groq (Qwen, GPT-OSS)", envVar: "GROQ_API_KEY" },
 ];
 
 const overrides = new Map<string, string>();

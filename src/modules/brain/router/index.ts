@@ -3,6 +3,11 @@ import type { TaskType } from "../classifier";
 import type { ProviderAdapter, ProviderResponse } from "../adapters/types";
 import { haikuAdapter, sonnetAdapter } from "../adapters/anthropic";
 import { openaiImageAdapter } from "../adapters/openai";
+import { deepseekAdapter } from "../adapters/deepseek";
+import { glmAdapter } from "../adapters/glm";
+import { kimiAdapter } from "../adapters/kimi";
+import { qwenAdapter } from "../adapters/qwen";
+import { gptOssAdapter } from "../adapters/gptOss";
 import { normalize } from "../normalizer";
 import { creditsForCost } from "../../ledger/ledger.service";
 import * as usageLog from "../usageLog";
@@ -16,18 +21,26 @@ import * as usageService from "../../usage/usage.service";
  * adding a real second/third option to any list is enough to get automatic
  * fallback for that task type. Per the technical plan §04.
  *
- * POC note: Anthropic (text-only) and OpenAI's gpt-image-1 (image-only) are
- * the only providers with adapters written so far — most lists below only
- * have one viable entry as a result. That's a coverage gap, not a design
- * one: a second provider for any task type is just another entry in its
- * list, in ranked order, via a new file in ../adapters/ implementing the
- * same ProviderAdapter interface.
+ * Open-source models (DeepSeek, GLM, Kimi, Qwen) are the primary path for
+ * text/code/research/plan; Anthropic is the fallback that only serves a
+ * request if every open-source option in the chain fails (missing key or a
+ * failed API call). A second/third option for any task type is just another
+ * entry in its list, in ranked order, via a new file in ../adapters/
+ * implementing the same ProviderAdapter interface.
  */
+const OPEN_SOURCE_CHAIN: ProviderAdapter[] = [
+  deepseekAdapter,
+  glmAdapter,
+  kimiAdapter,
+  qwenAdapter,
+  gptOssAdapter,
+];
+
 const HIERARCHY: Record<TaskType, ProviderAdapter[]> = {
-  text: [haikuAdapter, sonnetAdapter],
-  code: [sonnetAdapter],
-  research: [sonnetAdapter],
-  plan: [sonnetAdapter],
+  text: [...OPEN_SOURCE_CHAIN, haikuAdapter, sonnetAdapter],
+  code: [...OPEN_SOURCE_CHAIN, sonnetAdapter],
+  research: [...OPEN_SOURCE_CHAIN, sonnetAdapter],
+  plan: [...OPEN_SOURCE_CHAIN, sonnetAdapter],
   image: [openaiImageAdapter],
   voice: [],
   video: [],
@@ -132,6 +145,10 @@ async function walkChain(
       });
     } catch (err) {
       lastError = err;
+      console.warn(
+        `[router] ${chain[i].id} failed for taskType="${taskType}" — trying next option:`,
+        err instanceof Error ? err.message : err
+      );
     }
   }
   await persistError(
