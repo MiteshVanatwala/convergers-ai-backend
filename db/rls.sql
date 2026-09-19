@@ -117,6 +117,11 @@ CREATE POLICY tenant_isolation ON accounts FOR ALL
   USING (id = current_account_id() OR is_admin_context())
   WITH CHECK (id = current_account_id() OR is_admin_context());
 
+ALTER TABLE account_plans ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON account_plans FOR ALL
+  USING (account_id = current_account_id() OR is_admin_context())
+  WITH CHECK (account_id = current_account_id() OR is_admin_context());
+
 ALTER TABLE login_events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON login_events FOR ALL
   USING (account_id = current_account_id() OR is_admin_context())
@@ -342,7 +347,7 @@ GRANT EXECUTE ON FUNCTION admin_has_permission(uuid, text) TO app_admin;
 -- =========================================================================
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON
-  accounts, login_events, credit_wallets, credit_purchases,
+  accounts, account_plans, login_events, credit_wallets, credit_purchases,
   conversations, messages, message_feedback, orchestration_state,
   labels, conversation_labels, support_tickets,
   notification_preferences, personalization_settings, data_requests,
@@ -357,7 +362,7 @@ GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_user;
 
 -- app_admin gets everything app_user does, plus the admin-only tables.
 GRANT SELECT, INSERT, UPDATE, DELETE ON
-  accounts, login_events, credit_wallets, credit_purchases, credit_ledger,
+  accounts, account_plans, login_events, credit_wallets, credit_purchases, credit_ledger,
   conversations, messages, message_feedback, orchestration_state,
   labels, conversation_labels, support_tickets, usage_events,
   notification_preferences, personalization_settings, data_requests,

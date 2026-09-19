@@ -5,6 +5,7 @@ import { loadEnv } from "../../config/env";
 import { hashToken } from "../../shared/utils/session-token";
 import { logCaught } from "../../shared/utils/log";
 import { ensureWallet, grantSignupCredits } from "../ledger/ledger.service";
+import { ensureFreePlanMembership } from "../plans/plans.service";
 import type { AccountRow, SessionAccount } from "./types";
 
 type AccountWithGoogleId = AccountRow & { google_id: string | null };
@@ -81,6 +82,7 @@ export async function upsertGoogleAccount(input: {
           updateByGoogleParams
         );
         await ensureWallet(updated.rows[0].id, client);
+        await ensureFreePlanMembership(updated.rows[0].id, client, "migration");
         return updated.rows[0];
       }
 
@@ -115,6 +117,7 @@ export async function upsertGoogleAccount(input: {
           linkParams
         );
         await ensureWallet(updated.rows[0].id, client);
+        await ensureFreePlanMembership(updated.rows[0].id, client, "migration");
         return updated.rows[0];
       }
 
@@ -136,6 +139,7 @@ export async function upsertGoogleAccount(input: {
       );
       const created: AccountRow = inserted.rows[0];
       await grantSignupCredits(created.id, client);
+      await ensureFreePlanMembership(created.id, client, "signup");
       return created;
     });
   } catch (error: unknown) {

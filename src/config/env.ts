@@ -10,12 +10,20 @@ export type Env = {
   googleRedirectUri: string;
   sessionCookieName: string;
   sessionTtlDays: number;
+  adminSessionCookieName: string;
+  adminSessionTtlDays: number;
   cookieSecure: boolean;
   cookieSameSite: CookieSameSite;
   /** @deprecated Shared POC pool only — authenticated users use per-user wallets. */
   demoStartingCredits: number;
   /** Credits granted once on brand-new account create. Changing this does not rewrite past ledger rows. */
   signupGrantCredits: number;
+  /** Max POST /admin/auth/login attempts per IP per minute. */
+  adminLoginRateLimitPerMin: number;
+  /** Max GET /admin/admins* reads per admin per minute. */
+  adminOperatorsReadRateLimitPerMin: number;
+  /** Max mutating /admin/admins* calls per admin per minute. */
+  adminOperatorsMutationRateLimitPerMin: number;
 };
 
 function splitOrigins(value: string | undefined, fallback: string): string[] {
@@ -55,10 +63,22 @@ export function loadEnv(): Env {
       process.env.GOOGLE_REDIRECT_URI?.trim() || "http://localhost:8787/auth/google/callback",
     sessionCookieName: process.env.SESSION_COOKIE_NAME?.trim() || "convergers_session",
     sessionTtlDays: positiveInt(process.env.SESSION_TTL_DAYS, 14),
+    adminSessionCookieName:
+      process.env.ADMIN_SESSION_COOKIE_NAME?.trim() || "convergers_admin_session",
+    adminSessionTtlDays: positiveInt(process.env.ADMIN_SESSION_TTL_DAYS, 7),
     cookieSecure: process.env.COOKIE_SECURE === "true",
     cookieSameSite: parseCookieSameSite(process.env.COOKIE_SAMESITE),
     demoStartingCredits: nonNegativeInt(process.env.DEMO_STARTING_CREDITS, 100_000),
     signupGrantCredits: nonNegativeInt(process.env.SIGNUP_GRANT_CREDITS, 100),
+    adminLoginRateLimitPerMin: positiveInt(process.env.ADMIN_LOGIN_RATE_LIMIT_PER_MIN, 10),
+    adminOperatorsReadRateLimitPerMin: positiveInt(
+      process.env.ADMIN_OPERATORS_READ_RATE_LIMIT_PER_MIN,
+      120
+    ),
+    adminOperatorsMutationRateLimitPerMin: positiveInt(
+      process.env.ADMIN_OPERATORS_MUTATION_RATE_LIMIT_PER_MIN,
+      30
+    ),
   };
 }
 

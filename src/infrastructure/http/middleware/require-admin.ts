@@ -2,10 +2,13 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { AppStatus } from "../../../config/app-status-codes";
 import { fail } from "../../../shared/http/api-response";
 import {
-  findActiveAdminByEmail,
+  clearAdminSessionCookie,
+  readAdminSessionToken,
+} from "../../../shared/utils/admin-session-token";
+import {
+  resolveAdminSession,
   type ActiveAdminUser,
 } from "../../../modules/admin/admin-auth.service";
-import { requireSession } from "./require-session";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -14,19 +17,23 @@ declare module "fastify" {
 }
 
 /**
- * Require a valid session whose email is an active row in admin_users.
- * Sends 401 via requireSession when unauthenticated; 403 when not an admin.
+ * Require a valid admin session cookie for an active admin_users row.
+ * Independent of web Google sessions.
  */
 export async function requireAdmin(
   request: FastifyRequest,
   reply: FastifyReply
 ): Promise<ActiveAdminUser | null> {
-  const account = await requireSession(request, reply);
-  if (!account) return null;
+  const token = readAdminSessionToken(request.headers.cookie);
+  if (!token) {
+    fail(reply, AppStatus.ADMIN_AUTH_UNAUTHORIZED, "Unauthorized", 401);
+    return null;
+  }
 
-  const admin = await findActiveAdminByEmail(account.email);
+  const admin = await resolveAdminSession(token);
   if (!admin) {
-    fail(reply, AppStatus.ADMIN_FORBIDDEN, "Forbidden", 403);
+    reply.header("Set-Cookie", clearAdminSessionCookie());
+    fail(reply, AppStatus.ADMIN_AUTH_UNAUTHORIZED, "Unauthorized", 401);
     return null;
   }
 
