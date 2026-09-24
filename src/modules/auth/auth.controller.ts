@@ -163,8 +163,13 @@ async function mapMe(account: {
   avatar_url: string | null;
   auth_provider: string;
   created_at: Date;
+  impersonated_by?: string | null;
+  impersonator_label?: string | null;
 }) {
-  const membership = await plansService.getOrEnsureActivePlan(account.id);
+  const [membership, personalization] = await Promise.all([
+    plansService.getOrEnsureActivePlan(account.id),
+    authService.getPersonalizationSettings(account.id),
+  ]);
   return {
     id: account.id,
     email: account.email,
@@ -173,11 +178,18 @@ async function mapMe(account: {
     authProvider: account.auth_provider,
     createdAt: account.created_at.toISOString(),
     plan: plansService.mapAuthPlan(membership),
+    defaultModelId: personalization.defaultModelId,
+    filterSensitiveData: personalization.filterSensitiveData,
+    impersonatedBy: account.impersonated_by
+      ? { adminId: account.impersonated_by, adminLabel: account.impersonator_label ?? "an admin" }
+      : null,
   };
 }
 
 export async function updateMe(
-  request: FastifyRequest<{ Body: { name?: string | null } }>,
+  request: FastifyRequest<{
+    Body: { name?: string | null; defaultModelId?: string | null; filterSensitiveData?: boolean };
+  }>,
   reply: FastifyReply
 ) {
   try {
@@ -191,35 +203,99 @@ export async function updateMe(
       return fail(reply, AppStatus.AUTH_UNAUTHORIZED, "Unauthorized", 401);
     }
 
-    if (!("name" in (request.body ?? {}))) {
-      return fail(reply, AppStatus.AUTH_PROFILE_VALIDATION_FAILED, "name is required", 400);
+    const body = request.body ?? {};
+    const hasName = "name" in body;
+    const hasDefaultModel = "defaultModelId" in body;
+    const hasFilterSensitiveData = "filterSensitiveData" in body;
+    if (!hasName && !hasDefaultModel && !hasFilterSensitiveData) {
+      return fail(
+        reply,
+        AppStatus.AUTH_PROFILE_VALIDATION_FAILED,
+        "name, defaultModelId, or filterSensitiveData is required",
+        400
+      );
     }
 
-    const nameRaw = request.body?.name;
-    let name: string | null;
-    if (nameRaw === null) {
-      name = null;
-    } else if (typeof nameRaw === "string") {
-      const trimmed = nameRaw.trim();
-      if (trimmed.length > NAME_MAX_LEN) {
+    let updatedAccount: AccountRow = account;
+
+    if (hasName) {
+      const nameRaw = body.name;
+      let name: string | null;
+      if (nameRaw === null) {
+        name = null;
+      } else if (typeof nameRaw === "string") {
+        const trimmed = nameRaw.trim();
+        if (trimmed.length > NAME_MAX_LEN) {
+          return fail(
+            reply,
+            AppStatus.AUTH_PROFILE_VALIDATION_FAILED,
+            `name must be at most ${NAME_MAX_LEN} characters`,
+            400
+          );
+        }
+        name = trimmed.length > 0 ? trimmed : null;
+      } else {
+        return fail(reply, AppStatus.AUTH_PROFILE_VALIDATION_FAILED, "name must be a string or null", 400);
+      }
+
+      const updated = await authService.updateProfileName(account.id, name);
+      if (!updated) {
+        return fail(reply, AppStatus.AUTH_UNAUTHORIZED, "Unauthorized", 401);
+      }
+      updatedAccount = updated;
+    }
+
+    if (hasDefaultModel || hasFilterSensitiveData) {
+      const personalizationInput: { defaultModelId?: string | null; filterSensitiveData?: boolean } = {};
+
+      if (hasDefaultModel) {
+        const raw = body.defaultModelId;
+        if (raw !== null && typeof raw !== "string") {
+          return fail(
+            reply,
+            AppStatus.AUTH_PROFILE_VALIDATION_FAILED,
+            "defaultModelId must be a string or null",
+            400
+          );
+        }
+        personalizationInput.defaultModelId = raw;
+      }
+
+      if (hasFilterSensitiveData) {
+        if (typeof body.filterSensitiveData !== "boolean") {
+          return fail(
+            reply,
+            AppStatus.AUTH_PROFILE_VALIDATION_FAILED,
+            "filterSensitiveData must be a boolean",
+            400
+          );
+        }
+        personalizationInput.filterSensitiveData = body.filterSensitiveData;
+      }
+
+      const result = await authService.updatePersonalizationSettings(account.id, personalizationInput);
+      if (result === "invalid_model") {
         return fail(
           reply,
           AppStatus.AUTH_PROFILE_VALIDATION_FAILED,
-          `name must be at most ${NAME_MAX_LEN} characters`,
+          "Unknown or unavailable model",
           400
         );
       }
-      name = trimmed.length > 0 ? trimmed : null;
-    } else {
-      return fail(reply, AppStatus.AUTH_PROFILE_VALIDATION_FAILED, "name must be a string or null", 400);
     }
 
-    const updated = await authService.updateProfileName(account.id, name);
-    if (!updated) {
-      return fail(reply, AppStatus.AUTH_UNAUTHORIZED, "Unauthorized", 401);
-    }
-
-    return ok(reply, AppStatus.AUTH_PROFILE_UPDATED, await mapMe(updated));
+    // updateProfileName() returns a plain AccountRow (no impersonation columns) when the
+    // name changed — carry those fields from the original resolveSession() result, which
+    // is always accurate for this request, rather than losing the impersonation banner.
+    return ok(
+      reply,
+      AppStatus.AUTH_PROFILE_UPDATED,
+      await mapMe({
+        ...updatedAccount,
+        impersonated_by: account.impersonated_by,
+        impersonator_label: account.impersonator_label,
+      })
+    );
   } catch (error: unknown) {
     logCaught("auth.controller.updateMe", error);
     request.log.error(

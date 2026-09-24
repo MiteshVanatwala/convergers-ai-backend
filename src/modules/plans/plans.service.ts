@@ -1,6 +1,7 @@
 import type { PoolClient, QueryResult } from "pg";
 import { getPool } from "../../infrastructure/db/pool";
 import { logCaught } from "../../shared/utils/log";
+import { getHighlightsByPlan } from "./plan-features.service";
 
 export const PLAN_KEY_ORDER = ["free", "pro", "pay_as_you_go", "enterprise"] as const;
 export type PlanKey = (typeof PLAN_KEY_ORDER)[number];
@@ -43,7 +44,7 @@ type MembershipJoinRow = {
   ends_at: Date | null;
 };
 
-function asFeatures(raw: Record<string, unknown> | string | null | undefined): Record<string, unknown> {
+export function asFeatures(raw: Record<string, unknown> | string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
   if (typeof raw === "string") {
     try {
@@ -164,26 +165,32 @@ export async function getOrEnsureActivePlan(
 export async function listCatalogPlans(): Promise<PlanCatalogRow[]> {
   try {
     const pool = getPool();
-    const result: QueryResult<{
-      id: string | number;
-      key: string;
-      display_name: string;
-      price_usd_cents: number | null;
-      included_credits: number | null;
-      rate_limit_rpm: number | null;
-      features: Record<string, unknown> | string;
-    }> = await pool.query(
-      `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features
-       FROM plans
-       ORDER BY CASE key
-         WHEN 'free' THEN 1
-         WHEN 'pro' THEN 2
-         WHEN 'pay_as_you_go' THEN 3
-         WHEN 'enterprise' THEN 4
-         ELSE 99
-       END,
-       id ASC`
-    );
+    const [result, highlightsByPlan]: [
+      QueryResult<{
+        id: string | number;
+        key: string;
+        display_name: string;
+        price_usd_cents: number | null;
+        included_credits: number | null;
+        rate_limit_rpm: number | null;
+        features: Record<string, unknown> | string;
+      }>,
+      Map<string, string[]>,
+    ] = await Promise.all([
+      pool.query(
+        `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features
+         FROM plans
+         ORDER BY CASE key
+           WHEN 'free' THEN 1
+           WHEN 'pro' THEN 2
+           WHEN 'pay_as_you_go' THEN 3
+           WHEN 'enterprise' THEN 4
+           ELSE 99
+         END,
+         id ASC`
+      ),
+      getHighlightsByPlan(),
+    ]);
     return result.rows.map((row) => ({
       id: Number(row.id),
       key: row.key,
@@ -191,7 +198,11 @@ export async function listCatalogPlans(): Promise<PlanCatalogRow[]> {
       price_usd_cents: row.price_usd_cents,
       included_credits: row.included_credits,
       rate_limit_rpm: row.rate_limit_rpm,
-      features: asFeatures(row.features),
+      // Highlights are computed from the feature catalog (plan_features x
+      // feature_catalog — see plan-features.service.ts), not stored on this
+      // row — the plans.features jsonb column no longer carries a
+      // `highlights` key (dropped by plan_features_v1.sql's migration).
+      features: { ...asFeatures(row.features), highlights: highlightsByPlan.get(row.key) ?? [] },
     }));
   } catch (error: unknown) {
     logCaught("plans.service.listCatalogPlans", error);

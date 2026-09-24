@@ -8,3 +8,12 @@ export const glmAdapter = createOpenAICompatibleAdapter({
   providerKeyId: "glm",
   providerLabel: "GLM",
 });
+
+// Cheap/fast tier.
+export const glmAirAdapter = createOpenAICompatibleAdapter({
+  id: "glm:glm-4.5-air",
+  model: "glm-4.5-air",
+  baseURL: "https://api.z.ai/api/paas/v4",
+  providerKeyId: "glm",
+  providerLabel: "GLM",
+});

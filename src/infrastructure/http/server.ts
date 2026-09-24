@@ -8,11 +8,13 @@ import { registerConversationRoutes } from "../../modules/conversations/conversa
 import { registerProjectRoutes } from "../../modules/projects/projects.routes";
 import { registerUsageRoutes } from "../../modules/usage/usage.routes";
 import { registerPlanRoutes } from "../../modules/plans/plans.routes";
+import { initProviderConfig } from "../../modules/brain/adapters/provider-config-loader";
 
 export async function buildServer() {
   const app = Fastify({ logger: true });
 
   await registerCors(app);
+  await initProviderConfig();
 
   registerHealthRoutes(app);
   registerAuthRoutes(app);

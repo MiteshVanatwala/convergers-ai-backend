@@ -266,6 +266,16 @@ export async function chatStream(
 
     send("conversation", { id: conversation.id });
 
+    // Fetch prior turns BEFORE inserting the current message — otherwise
+    // it would show up as a duplicate trailing "history" entry alongside
+    // being passed separately as `input`.
+    const priorMessages = created
+      ? []
+      : await conversationsService.listMessages(account.id, conversation.id, 20);
+    const history = priorMessages
+      .filter((m) => m.status === "complete" && (m.role === "user" || m.role === "assistant"))
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+
     await conversationsService.insertMessage({
       conversationId: conversation.id,
       accountId: account.id,
@@ -278,6 +288,8 @@ export async function chatStream(
       input,
       ...(body.modality_hint ? { modality_hint: body.modality_hint } : {}),
       ...(body.policy ? { policy: body.policy } : {}),
+      ...(body.providerId ? { providerId: body.providerId } : {}),
+      ...(history.length > 0 ? { history } : {}),
     };
 
     const result: RouteResponse = await handleStreamRequest(

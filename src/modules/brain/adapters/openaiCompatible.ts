@@ -2,7 +2,22 @@ import OpenAI from "openai";
 import type { ProviderAdapter, ProviderResponse } from "./types";
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import { nativeCost } from "./pricing";
-import { getKey } from "./keyStore";
+import { resolveKeyForAccount } from "./accountKeyResolver";
+
+// Some open-weight models default to an agentic/tool-calling persona and
+// will hallucinate <tool_call> syntax for tools that don't exist — this
+// gateway never sends a `tools` schema to any provider, so make that
+// explicit rather than leaving the model to guess its own role.
+const SYSTEM_PROMPT =
+  "You are a helpful AI assistant. You do not have access to any tools, files, code execution, or external systems — respond directly with your complete answer as plain text/markdown. Never emit tool calls, function calls, or similar syntax.";
+
+function buildMessages(request: RouteRequest): OpenAI.Chat.ChatCompletionMessageParam[] {
+  return [
+    { role: "system" as const, content: SYSTEM_PROMPT },
+    ...(request.history ?? []).map((turn) => ({ role: turn.role, content: turn.content })),
+    { role: "user" as const, content: request.input },
+  ];
+}
 
 /**
  * Shared factory for any provider that speaks OpenAI's chat-completions
@@ -20,22 +35,18 @@ export function createOpenAICompatibleAdapter(config: {
 }): ProviderAdapter {
   const { id, model, baseURL, providerKeyId, providerLabel } = config;
 
-  function getClient(): OpenAI {
-    const apiKey = getKey(providerKeyId);
-    if (!apiKey) {
-      throw new Error(
-        `${providerLabel} isn't configured — add a key on the admin panel's API Keys page, or set the env var in backend/.env`
-      );
-    }
+  async function getClient(accountId: string | null): Promise<OpenAI> {
+    const apiKey = await resolveKeyForAccount(id, providerKeyId, providerLabel, accountId);
     return new OpenAI({ apiKey, baseURL });
   }
 
   return {
     id,
-    async call(request: RouteRequest): Promise<ProviderResponse> {
-      const response = await getClient().chat.completions.create({
+    async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
+      const client = await getClient(accountId);
+      const response = await client.chat.completions.create({
         model,
-        messages: [{ role: "user", content: request.input }],
+        messages: buildMessages(request),
       });
 
       const content = response.choices[0]?.message?.content ?? "";
@@ -46,10 +57,15 @@ export function createOpenAICompatibleAdapter(config: {
 
       return { content, usage, native_cost: nativeCost(model, usage) };
     },
-    async streamCall(request: RouteRequest, onDelta: (text: string) => void): Promise<ProviderResponse> {
-      const stream = await getClient().chat.completions.create({
+    async streamCall(
+      request: RouteRequest,
+      onDelta: (text: string) => void,
+      accountId: string | null
+    ): Promise<ProviderResponse> {
+      const client = await getClient(accountId);
+      const stream = await client.chat.completions.create({
         model,
-        messages: [{ role: "user", content: request.input }],
+        messages: buildMessages(request),
         stream: true,
         stream_options: { include_usage: true },
       });

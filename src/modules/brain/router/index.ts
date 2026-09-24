@@ -1,50 +1,117 @@
+import type { QueryResult } from "pg";
 import type { RouteRequest, RouteResponse } from "@convergers-ai/shared-types";
 import type { TaskType } from "../classifier";
 import type { ProviderAdapter, ProviderResponse } from "../adapters/types";
-import { haikuAdapter, sonnetAdapter } from "../adapters/anthropic";
+import { haikuAdapter, sonnetAdapter, opusAdapter } from "../adapters/anthropic";
 import { openaiImageAdapter } from "../adapters/openai";
-import { deepseekAdapter } from "../adapters/deepseek";
-import { glmAdapter } from "../adapters/glm";
+import { deepseekFlashAdapter, deepseekProAdapter } from "../adapters/deepseek";
+import { glmAdapter, glmAirAdapter } from "../adapters/glm";
 import { kimiAdapter } from "../adapters/kimi";
 import { qwenAdapter } from "../adapters/qwen";
 import { gptOssAdapter } from "../adapters/gptOss";
+import { geminiFlashAdapter, geminiProAdapter } from "../adapters/gemini";
+import { mistralLargeAdapter, mistralSmallAdapter } from "../adapters/mistral";
+import { xaiAdapter, grok43Adapter } from "../adapters/xai";
+import { openrouterAdapter } from "../adapters/openrouter";
 import { normalize } from "../normalizer";
 import { creditsForCost } from "../../ledger/ledger.service";
+import { getPool } from "../../../infrastructure/db/pool";
 import * as usageLog from "../usageLog";
 import * as usageService from "../../usage/usage.service";
+
+/**
+ * Every known adapter, keyed by the exact id used as `provider_registry.id`
+ * in the DB. This is the one place that still needs a code change when a
+ * genuinely new provider is added (per the stated scope — DB config only
+ * reorders/enables *these* adapters, it doesn't invent new ones).
+ */
+const ADAPTER_LOOKUP: Record<string, ProviderAdapter> = {
+  [haikuAdapter.id]: haikuAdapter,
+  [sonnetAdapter.id]: sonnetAdapter,
+  [opusAdapter.id]: opusAdapter,
+  [openaiImageAdapter.id]: openaiImageAdapter,
+  [deepseekFlashAdapter.id]: deepseekFlashAdapter,
+  [deepseekProAdapter.id]: deepseekProAdapter,
+  [glmAdapter.id]: glmAdapter,
+  [glmAirAdapter.id]: glmAirAdapter,
+  [kimiAdapter.id]: kimiAdapter,
+  [qwenAdapter.id]: qwenAdapter,
+  [gptOssAdapter.id]: gptOssAdapter,
+  [geminiFlashAdapter.id]: geminiFlashAdapter,
+  [geminiProAdapter.id]: geminiProAdapter,
+  [mistralLargeAdapter.id]: mistralLargeAdapter,
+  [mistralSmallAdapter.id]: mistralSmallAdapter,
+  [xaiAdapter.id]: xaiAdapter,
+  [grok43Adapter.id]: grok43Adapter,
+  [openrouterAdapter.id]: openrouterAdapter,
+};
+
+const TASK_TYPES: TaskType[] = ["text", "code", "image", "voice", "video", "research", "plan"];
+
+function emptyHierarchy(): Record<TaskType, ProviderAdapter[]> {
+  const hierarchy = {} as Record<TaskType, ProviderAdapter[]>;
+  for (const taskType of TASK_TYPES) hierarchy[taskType] = [];
+  return hierarchy;
+}
 
 /**
  * The hierarchy: every task type maps to a ranked list of model options.
  * The router walks each list top to bottom (see `walkChain`) and uses the
  * first one that actually works — same mechanism whether "doesn't work"
- * means "no API key configured" or "the provider's API call failed", so
- * adding a real second/third option to any list is enough to get automatic
- * fallback for that task type. Per the technical plan §04.
+ * means "no API key configured" or "the provider's API call failed", so a
+ * real second/third option in any list is enough to get automatic fallback
+ * for that task type.
  *
- * Open-source models (DeepSeek, GLM, Kimi, Qwen) are the primary path for
- * text/code/research/plan; Anthropic is the fallback that only serves a
- * request if every open-source option in the chain fails (missing key or a
- * failed API call). A second/third option for any task type is just another
- * entry in its list, in ranked order, via a new file in ../adapters/
- * implementing the same ProviderAdapter interface.
+ * DB-driven via `provider_routing_rules` (admin-configurable — see
+ * `admin-providers.service.ts`), not hardcoded. Held in memory and rebuilt
+ * by `reloadHierarchy()` — called once at boot and again after every admin
+ * write — rather than queried per-request, since this is read on every
+ * single chat message.
  */
-const OPEN_SOURCE_CHAIN: ProviderAdapter[] = [
-  deepseekAdapter,
-  glmAdapter,
-  kimiAdapter,
-  qwenAdapter,
-  gptOssAdapter,
-];
+let hierarchy: Record<TaskType, ProviderAdapter[]> = emptyHierarchy();
 
-const HIERARCHY: Record<TaskType, ProviderAdapter[]> = {
-  text: [...OPEN_SOURCE_CHAIN, haikuAdapter, sonnetAdapter],
-  code: [...OPEN_SOURCE_CHAIN, sonnetAdapter],
-  research: [...OPEN_SOURCE_CHAIN, sonnetAdapter],
-  plan: [...OPEN_SOURCE_CHAIN, sonnetAdapter],
-  image: [openaiImageAdapter],
-  voice: [],
-  video: [],
-};
+/**
+ * Models an explicit user pick is allowed to target — kept in sync with
+ * `reloadHierarchy()` for the same reason (no DB round-trip on the request
+ * hot path). Independent of `hierarchy`: a model can be visible here without
+ * being part of any task type's automatic chain, or vice versa.
+ */
+let visibleProviderIds = new Set<string>();
+
+type RoutingRow = { task_type: string; provider_id: string };
+
+/** Rebuilds the in-memory hierarchy + visible-model set. Call at boot and after any admin write (routing rules or visibility). */
+export async function reloadHierarchy(): Promise<void> {
+  const pool = getPool();
+  const [routingResult, registryResult]: [QueryResult<RoutingRow>, QueryResult<{ id: string }>] =
+    await Promise.all([
+      pool.query(
+        `SELECT rr.task_type, rr.provider_id
+         FROM provider_routing_rules rr
+         JOIN provider_registry pr ON pr.id = rr.provider_id
+         WHERE rr.enabled = true AND pr.status = 'active'
+         ORDER BY rr.task_type, rr.rank ASC`
+      ),
+      pool.query(
+        `SELECT id FROM provider_registry WHERE visible_to_users = true AND status = 'active'`
+      ),
+    ]);
+
+  const next = emptyHierarchy();
+  for (const row of routingResult.rows) {
+    if (!TASK_TYPES.includes(row.task_type as TaskType)) continue;
+    const adapter = ADAPTER_LOOKUP[row.provider_id];
+    if (!adapter) {
+      console.warn(
+        `[router] provider_routing_rules references unknown provider_id="${row.provider_id}" — skipping`
+      );
+      continue;
+    }
+    next[row.task_type as TaskType].push(adapter);
+  }
+  hierarchy = next;
+  visibleProviderIds = new Set(registryResult.rows.map((r) => r.id));
+}
 
 /** Live progress events for the streaming path — lets a client know the actual routing decision as it happens. */
 export type StageEvent = { stage: "classify"; taskType: TaskType } | { stage: "route"; provider: string; attempt: number };
@@ -82,16 +149,34 @@ async function resolveChain(
   accountId: string,
   ctx?: RouteUsageContext
 ): Promise<ProviderAdapter[]> {
-  const chain = HIERARCHY[taskType];
+  const chain = hierarchy[taskType];
   if (chain.length === 0) {
     await persistError(accountId, taskType, "unconfigured", ctx);
     throw new Error(
-      `This was classified as "${taskType}", but no provider is wired up for that yet in this POC ` +
-        `(only text/code/research/plan route to Anthropic, image routes to OpenAI). Add a "${taskType}" ` +
-        `adapter and list it in backend/src/brain/router/index.ts to support it.`
+      `This was classified as "${taskType}", but no enabled provider is configured for it. ` +
+        `Enable one for this task type on the admin panel's Providers page.`
     );
   }
   return chain;
+}
+
+/**
+ * A user explicitly picked a model — single-element chain, no automatic
+ * fallback mixed in. If it fails, the caller sees that model's own error,
+ * not a silent substitute they didn't ask for.
+ */
+async function resolveExplicitProvider(
+  providerId: string,
+  taskType: TaskType,
+  accountId: string,
+  ctx?: RouteUsageContext
+): Promise<ProviderAdapter[]> {
+  const adapter = ADAPTER_LOOKUP[providerId];
+  if (!adapter || !visibleProviderIds.has(providerId)) {
+    await persistError(accountId, taskType, providerId, ctx);
+    throw new Error(`"${providerId}" isn't a valid or currently available model.`);
+  }
+  return [adapter];
 }
 
 /**
@@ -166,8 +251,10 @@ export async function route(
   accountId: string,
   ctx?: RouteUsageContext
 ): Promise<RouteResponse> {
-  const chain = await resolveChain(taskType, accountId, ctx);
-  return walkChain(chain, accountId, taskType, (adapter) => adapter.call(request), undefined, ctx);
+  const chain = request.providerId
+    ? await resolveExplicitProvider(request.providerId, taskType, accountId, ctx)
+    : await resolveChain(taskType, accountId, ctx);
+  return walkChain(chain, accountId, taskType, (adapter) => adapter.call(request, accountId), undefined, ctx);
 }
 
 /**
@@ -186,12 +273,14 @@ export async function routeStream(
   onStage?: (event: StageEvent) => void,
   ctx?: RouteUsageContext
 ): Promise<RouteResponse> {
-  const chain = await resolveChain(taskType, accountId, ctx);
+  const chain = request.providerId
+    ? await resolveExplicitProvider(request.providerId, taskType, accountId, ctx)
+    : await resolveChain(taskType, accountId, ctx);
   return walkChain(
     chain,
     accountId,
     taskType,
-    (adapter) => adapter.streamCall(request, onDelta),
+    (adapter) => adapter.streamCall(request, onDelta, accountId),
     (adapter, attemptIndex) => {
       onStage?.({ stage: "route", provider: adapter.id, attempt: attemptIndex });
     },

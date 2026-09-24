@@ -17,6 +17,10 @@ export const PROVIDERS: ProviderInfo[] = [
   { id: "glm", label: "GLM (Zhipu)", envVar: "GLM_API_KEY" },
   { id: "kimi", label: "Kimi (Moonshot)", envVar: "KIMI_API_KEY" },
   { id: "groq", label: "Groq (Qwen, GPT-OSS)", envVar: "GROQ_API_KEY" },
+  { id: "gemini", label: "Google Gemini", envVar: "GEMINI_API_KEY" },
+  { id: "mistral", label: "Mistral AI", envVar: "MISTRAL_API_KEY" },
+  { id: "xai", label: "xAI (Grok)", envVar: "XAI_API_KEY" },
+  { id: "openrouter", label: "OpenRouter", envVar: "OPENROUTER_API_KEY" },
 ];
 
 const overrides = new Map<string, string>();

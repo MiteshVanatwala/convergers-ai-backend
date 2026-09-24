@@ -10,6 +10,8 @@ export type Env = {
   googleRedirectUri: string;
   sessionCookieName: string;
   sessionTtlDays: number;
+  /** Impersonation sessions are far shorter-lived than normal logins by design. */
+  impersonationTtlMinutes: number;
   adminSessionCookieName: string;
   adminSessionTtlDays: number;
   cookieSecure: boolean;
@@ -63,6 +65,7 @@ export function loadEnv(): Env {
       process.env.GOOGLE_REDIRECT_URI?.trim() || "http://localhost:8787/auth/google/callback",
     sessionCookieName: process.env.SESSION_COOKIE_NAME?.trim() || "convergers_session",
     sessionTtlDays: positiveInt(process.env.SESSION_TTL_DAYS, 14),
+    impersonationTtlMinutes: positiveInt(process.env.IMPERSONATION_TTL_MINUTES, 30),
     adminSessionCookieName:
       process.env.ADMIN_SESSION_COOKIE_NAME?.trim() || "convergers_admin_session",
     adminSessionTtlDays: positiveInt(process.env.ADMIN_SESSION_TTL_DAYS, 7),
@@ -84,4 +87,8 @@ export function loadEnv(): Env {
 
 export function primaryWebOrigin(env: Env = loadEnv()): string {
   return env.webOrigins[0] ?? "http://localhost:3000";
+}
+
+export function primaryAdminOrigin(env: Env = loadEnv()): string {
+  return env.adminOrigins[0] ?? "http://localhost:3002";
 }

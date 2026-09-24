@@ -7,6 +7,8 @@ export const AdminPermission = {
   ACCOUNT_REVEAL_CONTENT: "account.reveal_content",
   ACCOUNT_REFUND: "account.refund",
   ACCOUNT_SUSPEND: "account.suspend",
+  ACCOUNT_MANAGE_FEATURES: "account.manage_features",
+  ACCOUNT_IMPERSONATE: "account.impersonate",
   TICKET_MANAGE: "ticket.manage",
   RISK_QUEUE_REVIEW: "risk_queue.review",
   DASHBOARD_VIEW_AGGREGATE: "dashboard.view_aggregate",
@@ -16,6 +18,7 @@ export const AdminPermission = {
   FEATURE_FLAGS_MANAGE: "feature_flags.manage",
   MODERATION_REVIEW: "moderation.review",
   ADMIN_USERS_MANAGE: "admin_users.manage",
+  BILLING_MANAGE_PLANS: "billing.manage_plans",
 } as const;
 
 export type AdminPermissionKey = (typeof AdminPermission)[keyof typeof AdminPermission];

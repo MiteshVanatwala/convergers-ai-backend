@@ -10,6 +10,8 @@ export type AccountRow = {
 
 export type SessionAccount = AccountRow & {
   session_id: string;
+  impersonated_by: string | null;
+  impersonator_label: string | null;
 };
 
 export type GoogleUserInfo = {

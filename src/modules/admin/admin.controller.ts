@@ -14,6 +14,8 @@ import * as creditsService from "./credits.service";
 import type { LedgerListOrder } from "./credits.service";
 import { LEDGER_REASONS } from "./credits.service";
 import type { LedgerReasonValue } from "../../config/ledger-reasons";
+import * as featuresService from "../plans/plan-features.service";
+import { FeatureCatalogError } from "../plans/plan-features.service";
 
 /** Health stays a thin probe — not wrapped in the API envelope. */
 export async function health() {
@@ -223,6 +225,80 @@ export async function softDeleteUser(
   }
 }
 
+function failFromFeatureCatalogError(reply: FastifyReply, error: FeatureCatalogError) {
+  switch (error.kind) {
+    case "validation":
+      return fail(reply, AppStatus.ADMIN_USER_FEATURE_VALIDATION_FAILED, error.message, 400);
+    case "not_found":
+      return fail(reply, AppStatus.ADMIN_USER_FEATURE_NOT_FOUND, error.message, 404);
+  }
+}
+
+export async function getUserFeatures(
+  request: FastifyRequest<{ Params: { id: string } }>,
+  reply: FastifyReply
+) {
+  try {
+    const { id } = request.params;
+    if (!UUID_RE.test(id)) {
+      return fail(reply, AppStatus.ADMIN_USERS_VALIDATION_FAILED, "Invalid user id", 400);
+    }
+    const features = await featuresService.getEffectiveFeaturesForAccount(id);
+    return ok(reply, AppStatus.ADMIN_USER_FEATURES_RETRIEVED, features);
+  } catch (error: unknown) {
+    logCaught("admin.controller.getUserFeatures", error);
+    return fail(reply, AppStatus.ADMIN_USER_FEATURES_FETCH_FAILED, "Failed to load user features", 500);
+  }
+}
+
+export async function setUserFeature(
+  request: FastifyRequest<{ Params: { id: string; key: string }; Body: { granted?: boolean } }>,
+  reply: FastifyReply
+) {
+  try {
+    const { id, key } = request.params;
+    if (!UUID_RE.test(id)) {
+      return fail(reply, AppStatus.ADMIN_USERS_VALIDATION_FAILED, "Invalid user id", 400);
+    }
+    if (typeof request.body?.granted !== "boolean") {
+      return fail(reply, AppStatus.ADMIN_USER_FEATURE_VALIDATION_FAILED, "granted must be a boolean", 400);
+    }
+    const result = await featuresService.setAccountFeatureOverride({
+      actorId: request.admin!.id,
+      accountId: id,
+      featureKey: key,
+      granted: request.body.granted,
+    });
+    return ok(reply, AppStatus.ADMIN_USER_FEATURE_SET, result);
+  } catch (error: unknown) {
+    if (error instanceof FeatureCatalogError) return failFromFeatureCatalogError(reply, error);
+    logCaught("admin.controller.setUserFeature", error);
+    return fail(reply, AppStatus.ADMIN_USER_FEATURE_SET_FAILED, "Failed to set user feature", 500);
+  }
+}
+
+export async function clearUserFeature(
+  request: FastifyRequest<{ Params: { id: string; key: string } }>,
+  reply: FastifyReply
+) {
+  try {
+    const { id, key } = request.params;
+    if (!UUID_RE.test(id)) {
+      return fail(reply, AppStatus.ADMIN_USERS_VALIDATION_FAILED, "Invalid user id", 400);
+    }
+    const result = await featuresService.clearAccountFeatureOverride({
+      actorId: request.admin!.id,
+      accountId: id,
+      featureKey: key,
+    });
+    return ok(reply, AppStatus.ADMIN_USER_FEATURE_CLEARED, result);
+  } catch (error: unknown) {
+    if (error instanceof FeatureCatalogError) return failFromFeatureCatalogError(reply, error);
+    logCaught("admin.controller.clearUserFeature", error);
+    return fail(reply, AppStatus.ADMIN_USER_FEATURE_CLEAR_FAILED, "Failed to clear user feature", 500);
+  }
+}
+
 function parseOptionalDate(raw: string | undefined): Date | null | "invalid" {
   if (!raw?.trim()) return null;
   const ms = Date.parse(raw.trim());
@@ -389,48 +465,5 @@ export async function stats(request: FastifyRequest, reply: FastifyReply) {
     logCaught("admin.controller.stats", error);
     request.log.error({ err: error }, "[admin.controller.stats] failed");
     return fail(reply, AppStatus.ADMIN_STATS_FETCH_FAILED, "Failed to load stats", 500);
-  }
-}
-
-export async function listProviders(request: FastifyRequest, reply: FastifyReply) {
-  try {
-    const providers = adminService.listProviders();
-    return ok(reply, AppStatus.ADMIN_PROVIDERS_RETRIEVED, providers);
-  } catch (error: unknown) {
-    logCaught("admin.controller.listProviders", error);
-    request.log.error({ err: error }, "[admin.controller.listProviders] failed");
-    return fail(reply, AppStatus.ADMIN_PROVIDERS_FETCH_FAILED, "Failed to list providers", 500);
-  }
-}
-
-export async function setProviderKey(
-  request: FastifyRequest<{ Params: { id: string }; Body: { apiKey?: string } }>,
-  reply: FastifyReply
-) {
-  try {
-    const { id } = request.params;
-    const apiKey = request.body?.apiKey?.trim();
-    if (!apiKey) {
-      return fail(
-        reply,
-        AppStatus.ADMIN_PROVIDER_VALIDATION_FAILED,
-        "apiKey is required",
-        400
-      );
-    }
-    const result = adminService.setProviderKey(id, apiKey);
-    if ("error" in result) {
-      return fail(reply, AppStatus.ADMIN_PROVIDER_NOT_FOUND, "Unknown provider", 404);
-    }
-    return ok(reply, AppStatus.ADMIN_PROVIDER_KEY_SET, {
-      id,
-      configured: true,
-      source: "override" as const,
-      maskedKey: adminService.maskProviderKey(apiKey),
-    });
-  } catch (error: unknown) {
-    logCaught("admin.controller.setProviderKey", error);
-    request.log.error({ err: error }, "[admin.controller.setProviderKey] failed");
-    return fail(reply, AppStatus.ADMIN_PROVIDER_KEY_FAILED, "Failed to set provider key", 500);
   }
 }
