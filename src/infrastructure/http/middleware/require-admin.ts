@@ -10,11 +10,6 @@ import {
   type ActiveAdminUser,
 } from "../../../modules/admin/admin-auth.service";
 
-declare module "fastify" {
-  interface FastifyRequest {
-    admin?: ActiveAdminUser;
-  }
-}
 
 /**
  * Require a valid admin session cookie for an active admin_users row.
