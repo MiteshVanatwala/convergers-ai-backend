@@ -5,7 +5,7 @@ import { getPool } from "../../infrastructure/db/pool";
 import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
 import { logCaught } from "../../shared/utils/log";
 
-const CREDITS_PER_USD = 1000;
+export const CREDITS_PER_USD = 1000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** In-memory balances for admin POC client ids that are not real account UUIDs. */
@@ -120,8 +120,97 @@ export async function grantSignupCredits(
   }
 }
 
+type RecurringGrantPrecheckRow = {
+  recurring_grant_credits: number;
+  recurring_grant_period_hours: number | null;
+  last_recurring_grant_at: Date | null;
+};
+
+function grantDue(row: RecurringGrantPrecheckRow): boolean {
+  if (row.recurring_grant_credits <= 0 || row.recurring_grant_period_hours == null) return false;
+  if (!row.last_recurring_grant_at) return true;
+  const dueAt = row.last_recurring_grant_at.getTime() + row.recurring_grant_period_hours * 3_600_000;
+  return Date.now() >= dueAt;
+}
+
+/**
+ * Lazily-evaluated rolling window (not a scheduled/cron reset): tops up an
+ * account's wallet if its plan has a recurring grant configured and enough
+ * time has passed since it last received one. Cheap no-op in the common
+ * case (nothing due) — only opens a locking transaction when a grant looks
+ * due, and re-checks under the lock to stay correct under concurrent calls
+ * for the same account.
+ */
+export async function applyDueRecurringGrant(accountId: string): Promise<void> {
+  if (!isAccountUuid(accountId)) return;
+
+  try {
+    const pool = getPool();
+    const precheck: QueryResult<RecurringGrantPrecheckRow> = await runQuery(
+      pool,
+      `SELECT p.recurring_grant_credits, p.recurring_grant_period_hours, w.last_recurring_grant_at
+       FROM account_plans ap
+       JOIN plans p ON p.id = ap.plan_id
+       LEFT JOIN credit_wallets w ON w.account_id = ap.account_id
+       WHERE ap.account_id = $1 AND ap.status = 'active'`,
+      [accountId]
+    );
+    const row = precheck.rows[0];
+    if (!row || !grantDue(row)) return;
+
+    await withPoolTransaction(async (client: PoolClient) => {
+      await ensureWallet(accountId, client);
+      const locked: QueryResult<{
+        balance: string;
+        recurring_grant_credits: number;
+        recurring_grant_period_hours: number | null;
+        last_recurring_grant_at: Date | null;
+      }> = await runQuery(
+        client,
+        `SELECT w.balance, p.recurring_grant_credits, p.recurring_grant_period_hours, w.last_recurring_grant_at
+         FROM credit_wallets w
+         JOIN account_plans ap ON ap.account_id = w.account_id AND ap.status = 'active'
+         JOIN plans p ON p.id = ap.plan_id
+         WHERE w.account_id = $1
+         FOR UPDATE OF w`,
+        [accountId]
+      );
+      const current = locked.rows[0];
+      if (!current || !grantDue(current)) return; // another request already applied it
+
+      const balanceAfter = asNumber(current.balance) + current.recurring_grant_credits;
+      await runQuery(
+        client,
+        `INSERT INTO credit_ledger (
+           account_id, amount, reason, balance_after, reference_type, reference_id
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6)`,
+        [
+          accountId,
+          current.recurring_grant_credits,
+          LedgerReason.RECURRING_GRANT,
+          balanceAfter,
+          LedgerReferenceType.RECURRING_GRANT,
+          accountId,
+        ]
+      );
+      await runQuery(
+        client,
+        `UPDATE credit_wallets
+         SET balance = $2, last_recurring_grant_at = now(), updated_at = now()
+         WHERE account_id = $1`,
+        [accountId, balanceAfter]
+      );
+    });
+  } catch (error: unknown) {
+    logCaught("ledger.service.applyDueRecurringGrant", error);
+    throw error;
+  }
+}
+
 export async function getBalance(accountId: string, client?: PoolClient): Promise<number> {
   try {
+    await applyDueRecurringGrant(accountId);
+
     if (!isAccountUuid(accountId)) {
       if (!adminPocBalances.has(accountId)) {
         adminPocBalances.set(accountId, loadEnv().demoStartingCredits);
@@ -156,6 +245,8 @@ export async function debit(
   options?: { referenceId?: string | null; client?: PoolClient }
 ): Promise<{ charged: number; balance: number }> {
   try {
+    await applyDueRecurringGrant(accountId);
+
     if (!isAccountUuid(accountId)) {
       const current = await getBalance(accountId);
       const charged = Math.min(credits, current);

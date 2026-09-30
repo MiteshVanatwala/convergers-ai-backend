@@ -31,6 +31,8 @@ type UpdatePlanBody = {
   rateLimitRpm?: number | null;
   tagline?: string | null;
   selfServe?: boolean;
+  recurringGrantCredits?: number;
+  recurringGrantPeriodHours?: number | null;
 };
 
 export async function updatePlan(
@@ -45,6 +47,22 @@ export async function updatePlan(
     if (typeof body.selfServe !== "boolean") {
       return fail(reply, AppStatus.ADMIN_PLAN_VALIDATION_FAILED, "selfServe must be a boolean", 400);
     }
+    if (typeof body.recurringGrantCredits !== "number") {
+      return fail(
+        reply,
+        AppStatus.ADMIN_PLAN_VALIDATION_FAILED,
+        "recurringGrantCredits must be a number",
+        400
+      );
+    }
+    if (body.recurringGrantPeriodHours !== null && typeof body.recurringGrantPeriodHours !== "number") {
+      return fail(
+        reply,
+        AppStatus.ADMIN_PLAN_VALIDATION_FAILED,
+        "recurringGrantPeriodHours must be a number or null",
+        400
+      );
+    }
 
     const result = await plansService.updatePlan({
       actorId: request.admin!.id,
@@ -55,6 +73,8 @@ export async function updatePlan(
       rateLimitRpm: body.rateLimitRpm ?? null,
       tagline: body.tagline ?? null,
       selfServe: body.selfServe,
+      recurringGrantCredits: body.recurringGrantCredits,
+      recurringGrantPeriodHours: body.recurringGrantPeriodHours ?? null,
     });
     return ok(reply, AppStatus.ADMIN_PLAN_UPDATED, result);
   } catch (error: unknown) {

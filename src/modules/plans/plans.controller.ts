@@ -4,6 +4,7 @@ import { requireSession } from "../../infrastructure/http/middleware/require-ses
 import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
 import * as plansService from "./plans.service";
+import { PlanSwitchError } from "./plans.service";
 
 export async function listPlans(request: FastifyRequest, reply: FastifyReply) {
   const account = await requireSession(request, reply);
@@ -17,5 +18,27 @@ export async function listPlans(request: FastifyRequest, reply: FastifyReply) {
     logCaught("plans.controller.listPlans", error);
     request.log.error({ err: error }, "[plans.controller.listPlans] failed");
     return fail(reply, AppStatus.PLANS_FETCH_FAILED, "Failed to load plans", 500);
+  }
+}
+
+export async function switchPlan(
+  request: FastifyRequest<{ Body: { planKey?: string } }>,
+  reply: FastifyReply
+) {
+  const account = await requireSession(request, reply);
+  if (!account) return;
+  try {
+    const planKey = typeof request.body?.planKey === "string" ? request.body.planKey : "";
+    if (!planKey) {
+      return fail(reply, AppStatus.PLAN_SWITCH_VALIDATION_FAILED, "planKey is required", 400);
+    }
+    const membership = await plansService.switchToSelfServePlan(account.id, planKey);
+    return ok(reply, AppStatus.PLAN_SWITCH_OK, plansService.mapAuthPlan(membership));
+  } catch (error: unknown) {
+    if (error instanceof PlanSwitchError) {
+      return fail(reply, AppStatus.PLAN_SWITCH_VALIDATION_FAILED, error.message, 400);
+    }
+    logCaught("plans.controller.switchPlan", error);
+    return fail(reply, AppStatus.PLAN_SWITCH_FAILED, "Failed to switch plan", 500);
   }
 }

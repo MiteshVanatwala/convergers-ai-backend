@@ -26,6 +26,8 @@ const IMAGE_FLAT_COST_USD = 0.04;
  */
 export const openaiImageAdapter: ProviderAdapter = {
   id: "openai:gpt-image-1",
+  keyProviderId: "openai",
+  cost: { kind: "flat", usd: IMAGE_FLAT_COST_USD },
   async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
     const client = await getClient(accountId);
     const response = await client.images.generate({

@@ -6,7 +6,12 @@ import { loadEnv } from "../../config/env";
 import { requireSession } from "../../infrastructure/http/middleware/require-session";
 import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
-import { handleRequest, handleStreamRequest } from "../brain";
+import {
+  INSUFFICIENT_CREDITS_CODE,
+  handleRequest,
+  handleStreamRequest,
+  userFacingPayload,
+} from "../brain";
 import { getBalance } from "../ledger/ledger.service";
 import { getPool } from "../../infrastructure/db/pool";
 import { isConfigured } from "../brain/adapters/keyStore";
@@ -169,9 +174,13 @@ export async function route(
       { err },
       `[routing.controller.route] ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`
     );
+    const payload = userFacingPayload(err);
+    if (payload.code === INSUFFICIENT_CREDITS_CODE) {
+      return reply.status(402).send({ error: INSUFFICIENT_CREDITS_CODE, message: payload.message });
+    }
     return reply.status(502).send({
       error: "upstream_failure",
-      message: err instanceof Error ? err.message : String(err),
+      message: payload.message,
     });
   }
 }
@@ -221,7 +230,7 @@ export async function routeStream(
       { err },
       `[routing.controller.routeStream] ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`
     );
-    send("error", { message: err instanceof Error ? err.message : String(err) });
+    send("error", userFacingPayload(err));
   } finally {
     res.end();
   }

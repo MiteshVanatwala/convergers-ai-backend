@@ -1,5 +1,10 @@
 import OpenAI from "openai";
-import type { ProviderAdapter, ProviderResponse } from "./types";
+import {
+  outputTokenLimit,
+  withSystemNote,
+  type ProviderAdapter,
+  type ProviderResponse,
+} from "./types";
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import { nativeCost } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
@@ -11,9 +16,14 @@ import { resolveKeyForAccount } from "./accountKeyResolver";
 const SYSTEM_PROMPT =
   "You are a helpful AI assistant. You do not have access to any tools, files, code execution, or external systems — respond directly with your complete answer as plain text/markdown. Never emit tool calls, function calls, or similar syntax.";
 
+// Always sent explicitly: provider defaults vary (and some are large), which
+// would make the pre-call credit check meaningless. 8192 is within every
+// wired-up provider's output limit (DeepSeek's is the lowest at 8K).
+const MAX_OUTPUT_TOKENS = 8192;
+
 function buildMessages(request: RouteRequest): OpenAI.Chat.ChatCompletionMessageParam[] {
   return [
-    { role: "system" as const, content: SYSTEM_PROMPT },
+    { role: "system" as const, content: withSystemNote(SYSTEM_PROMPT, request) },
     ...(request.history ?? []).map((turn) => ({ role: turn.role, content: turn.content })),
     { role: "user" as const, content: request.input },
   ];
@@ -42,11 +52,14 @@ export function createOpenAICompatibleAdapter(config: {
 
   return {
     id,
+    keyProviderId: providerKeyId,
+    cost: { kind: "tokens", model, maxOutputTokens: MAX_OUTPUT_TOKENS },
     async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
       const client = await getClient(accountId);
       const response = await client.chat.completions.create({
         model,
         messages: buildMessages(request),
+        max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
       });
 
       const content = response.choices[0]?.message?.content ?? "";
@@ -55,7 +68,12 @@ export function createOpenAICompatibleAdapter(config: {
         output_tokens: response.usage?.completion_tokens ?? 0,
       };
 
-      return { content, usage, native_cost: nativeCost(model, usage) };
+      return {
+        content,
+        usage,
+        native_cost: nativeCost(model, usage),
+        truncated: response.choices[0]?.finish_reason === "length",
+      };
     },
     async streamCall(
       request: RouteRequest,
@@ -66,14 +84,17 @@ export function createOpenAICompatibleAdapter(config: {
       const stream = await client.chat.completions.create({
         model,
         messages: buildMessages(request),
+        max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
         stream: true,
         stream_options: { include_usage: true },
       });
 
       let content = "";
       let usage = { input_tokens: 0, output_tokens: 0 };
+      let truncated = false;
 
       for await (const chunk of stream) {
+        if (chunk.choices[0]?.finish_reason === "length") truncated = true;
         const delta = chunk.choices[0]?.delta?.content ?? "";
         if (delta) {
           content += delta;
@@ -87,7 +108,7 @@ export function createOpenAICompatibleAdapter(config: {
         }
       }
 
-      return { content, usage, native_cost: nativeCost(model, usage) };
+      return { content, usage, native_cost: nativeCost(model, usage), truncated };
     },
   };
 }

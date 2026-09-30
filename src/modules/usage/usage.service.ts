@@ -2,7 +2,7 @@ import type { PoolClient, QueryResult } from "pg";
 import { LedgerReason, LedgerReferenceType } from "../../config/ledger-reasons";
 import { getPool } from "../../infrastructure/db/pool";
 import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
-import { debit, ensureWallet } from "../ledger/ledger.service";
+import { applyDueRecurringGrant, debit, ensureWallet } from "../ledger/ledger.service";
 import { logCaught } from "../../shared/utils/log";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -195,6 +195,8 @@ export async function recordSuccessAndDebit(
   input: RecordSuccessAndDebitInput
 ): Promise<RecordSuccessAndDebitResult> {
   try {
+    await applyDueRecurringGrant(input.accountId);
+
     if (!isAccountUuid(input.accountId)) {
       const { charged, balance } = await debit(input.accountId, input.creditsRequested);
       return { charged, balance, usageEventId: null };

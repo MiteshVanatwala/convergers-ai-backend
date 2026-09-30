@@ -9,6 +9,8 @@ export function normalize(
     creditsCharged: number;
     fallbackUsed?: boolean;
     usageEventId?: string | null;
+    /** Cut off because the output cap was lowered to what the credit balance covers. */
+    truncatedByCredits?: boolean;
   }
 ): RouteResponse {
   return {
@@ -18,6 +20,8 @@ export function normalize(
     credits_charged: opts.creditsCharged,
     content: response.content,
     fallback_used: opts.fallbackUsed,
+    ...(response.truncated ? { truncated: true } : {}),
+    ...(opts.truncatedByCredits ? { truncated_by_credits: true } : {}),
     ...(opts.usageEventId ? { usage_event_id: opts.usageEventId } : {}),
   };
 }

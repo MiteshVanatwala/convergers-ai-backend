@@ -8,6 +8,7 @@ import { registerConversationRoutes } from "../../modules/conversations/conversa
 import { registerProjectRoutes } from "../../modules/projects/projects.routes";
 import { registerUsageRoutes } from "../../modules/usage/usage.routes";
 import { registerPlanRoutes } from "../../modules/plans/plans.routes";
+import { registerBillingRoutes, registerRazorpayWebhookRoute } from "../../modules/billing/billing.routes";
 import { initProviderConfig } from "../../modules/brain/adapters/provider-config-loader";
 
 export async function buildServer() {
@@ -23,6 +24,8 @@ export async function buildServer() {
   registerProjectRoutes(app);
   registerUsageRoutes(app);
   registerPlanRoutes(app);
+  registerBillingRoutes(app);
+  await registerRazorpayWebhookRoute(app);
   registerAdminRoutes(app);
 
   return app;

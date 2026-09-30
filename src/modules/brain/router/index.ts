@@ -1,6 +1,6 @@
 import type { QueryResult } from "pg";
 import type { RouteRequest, RouteResponse } from "@convergers-ai/shared-types";
-import type { TaskType } from "../classifier";
+import type { ClassificationMethod, TaskType } from "../classifier";
 import type { ProviderAdapter, ProviderResponse } from "../adapters/types";
 import { haikuAdapter, sonnetAdapter, opusAdapter } from "../adapters/anthropic";
 import { openaiImageAdapter } from "../adapters/openai";
@@ -18,6 +18,8 @@ import { creditsForCost } from "../../ledger/ledger.service";
 import { getPool } from "../../../infrastructure/db/pool";
 import * as usageLog from "../usageLog";
 import * as usageService from "../../usage/usage.service";
+import { UserFacingError, describeProviderFailure, isCapacityError } from "./errors";
+import { BYOK_FEE_CREDITS, planAttempt } from "./credits";
 
 /**
  * Every known adapter, keyed by the exact id used as `provider_registry.id`
@@ -78,12 +80,20 @@ let hierarchy: Record<TaskType, ProviderAdapter[]> = emptyHierarchy();
  */
 let visibleProviderIds = new Set<string>();
 
+/** provider_registry id -> display label, for user-facing error messages. */
+let providerLabels = new Map<string, string>();
+
+function labelFor(providerId: string): string {
+  return providerLabels.get(providerId) ?? providerId;
+}
+
 type RoutingRow = { task_type: string; provider_id: string };
+type RegistryRow = { id: string; label: string | null; visible_to_users: boolean };
 
 /** Rebuilds the in-memory hierarchy + visible-model set. Call at boot and after any admin write (routing rules or visibility). */
 export async function reloadHierarchy(): Promise<void> {
   const pool = getPool();
-  const [routingResult, registryResult]: [QueryResult<RoutingRow>, QueryResult<{ id: string }>] =
+  const [routingResult, registryResult]: [QueryResult<RoutingRow>, QueryResult<RegistryRow>] =
     await Promise.all([
       pool.query(
         `SELECT rr.task_type, rr.provider_id
@@ -93,7 +103,7 @@ export async function reloadHierarchy(): Promise<void> {
          ORDER BY rr.task_type, rr.rank ASC`
       ),
       pool.query(
-        `SELECT id FROM provider_registry WHERE visible_to_users = true AND status = 'active'`
+        `SELECT id, label, visible_to_users FROM provider_registry WHERE status = 'active'`
       ),
     ]);
 
@@ -110,11 +120,21 @@ export async function reloadHierarchy(): Promise<void> {
     next[row.task_type as TaskType].push(adapter);
   }
   hierarchy = next;
-  visibleProviderIds = new Set(registryResult.rows.map((r) => r.id));
+  visibleProviderIds = new Set(
+    registryResult.rows.filter((r) => r.visible_to_users).map((r) => r.id)
+  );
+  providerLabels = new Map(
+    registryResult.rows.filter((r) => r.label).map((r) => [r.id, r.label as string])
+  );
 }
 
 /** Live progress events for the streaming path — lets a client know the actual routing decision as it happens. */
-export type StageEvent = { stage: "classify"; taskType: TaskType } | { stage: "route"; provider: string; attempt: number };
+export type StageEvent =
+  | { stage: "classify"; taskType: TaskType; method: ClassificationMethod }
+  | { stage: "redact" }
+  /** `pick`: the user's explicit model choice, or chosen automatically for the task type. */
+  | { stage: "route"; provider: string; attempt: number; pick: "explicit" | "auto" }
+  | { stage: "generating"; provider: string; inputTokens: number };
 
 /** Optional chat context so usage_events can store conversation_id. */
 export type RouteUsageContext = {
@@ -152,18 +172,22 @@ async function resolveChain(
   const chain = hierarchy[taskType];
   if (chain.length === 0) {
     await persistError(accountId, taskType, "unconfigured", ctx);
-    throw new Error(
-      `This was classified as "${taskType}", but no enabled provider is configured for it. ` +
-        `Enable one for this task type on the admin panel's Providers page.`
+    // Admin-facing detail stays in the log; the user gets a plain explanation.
+    console.warn(
+      `[router] no enabled provider for taskType="${taskType}" — enable one on the admin panel's Providers page`
+    );
+    throw new UserFacingError(
+      `No model is available for this kind of request (${taskType}) right now. Please try again later.`
     );
   }
   return chain;
 }
 
 /**
- * A user explicitly picked a model — single-element chain, no automatic
- * fallback mixed in. If it fails, the caller sees that model's own error,
- * not a silent substitute they didn't ask for.
+ * A user explicitly picked a model — it goes first, followed by the task
+ * type's automatic chain. `walkChain` only moves past the pick when it hit a
+ * rate/capacity limit (see `isCapacityError`); any other failure surfaces the
+ * picked model's own error rather than a substitute they didn't ask for.
  */
 async function resolveExplicitProvider(
   providerId: string,
@@ -174,9 +198,24 @@ async function resolveExplicitProvider(
   const adapter = ADAPTER_LOOKUP[providerId];
   if (!adapter || !visibleProviderIds.has(providerId)) {
     await persistError(accountId, taskType, providerId, ctx);
-    throw new Error(`"${providerId}" isn't a valid or currently available model.`);
+    throw new UserFacingError(`"${labelFor(providerId)}" isn't a valid or currently available model.`);
   }
-  return [adapter];
+  return [adapter, ...hierarchy[taskType].filter((a) => a.id !== adapter.id)];
+}
+
+async function resolveRouteChain(
+  request: RouteRequest,
+  taskType: TaskType,
+  accountId: string,
+  ctx?: RouteUsageContext
+): Promise<{ chain: ProviderAdapter[]; explicitPick: boolean }> {
+  if (request.providerId) {
+    return {
+      chain: await resolveExplicitProvider(request.providerId, taskType, accountId, ctx),
+      explicitPick: true,
+    };
+  }
+  return { chain: await resolveChain(taskType, accountId, ctx), explicitPick: false };
 }
 
 /**
@@ -189,18 +228,26 @@ async function resolveExplicitProvider(
  */
 async function walkChain(
   chain: ProviderAdapter[],
+  request: RouteRequest,
   accountId: string,
   taskType: TaskType,
-  attempt: (adapter: ProviderAdapter) => Promise<ProviderResponse>,
+  attempt: (adapter: ProviderAdapter, request: RouteRequest) => Promise<ProviderResponse>,
   onAttempt?: (adapter: ProviderAdapter, attemptIndex: number) => void | Promise<void>,
-  ctx?: RouteUsageContext
+  ctx?: RouteUsageContext,
+  explicitPick = false
 ): Promise<RouteResponse> {
+  let firstError: unknown;
   let lastError: unknown;
+  let lastIndex = 0;
   for (let i = 0; i < chain.length; i++) {
-    await onAttempt?.(chain[i], i);
+    lastIndex = i;
     try {
-      const response = await attempt(chain[i]);
-      const credits = creditsForCost(response.native_cost);
+      // Priced before it's announced, so an option skipped for credits never
+      // shows up as "Sending to …" in the client's routing timeline.
+      const plan = await planAttempt(chain[i], request, accountId, labelFor(chain[i].id));
+      await onAttempt?.(chain[i], i);
+      const response = await attempt(chain[i], plan.request);
+      const credits = plan.byok ? BYOK_FEE_CREDITS : creditsForCost(response.native_cost);
       const { charged, usageEventId } = await usageService.recordSuccessAndDebit({
         accountId,
         conversationId: ctx?.conversationId,
@@ -227,22 +274,53 @@ async function walkChain(
         creditsCharged: charged,
         fallbackUsed: i > 0,
         usageEventId,
+        truncatedByCredits: plan.cappedByCredits && response.truncated === true,
       });
     } catch (err) {
+      if (i === 0) firstError = err;
       lastError = err;
+      // An explicit pick only falls back when it was rate/capacity limited.
+      const stop = explicitPick && i === 0 && !isCapacityError(err);
       console.warn(
-        `[router] ${chain[i].id} failed for taskType="${taskType}" — trying next option:`,
+        `[router] ${chain[i].id} failed for taskType="${taskType}"${stop ? " (explicit pick, not falling back)" : " — trying next option"}:`,
         err instanceof Error ? err.message : err
       );
+      if (stop) break;
     }
   }
-  await persistError(
-    accountId,
-    taskType,
-    chain[chain.length - 1]?.id ?? "unconfigured",
-    ctx
+  await persistError(accountId, taskType, chain[lastIndex]?.id ?? "unconfigured", ctx);
+  throw chainFailure(chain, explicitPick, lastIndex, firstError, lastError);
+}
+
+/** The one user-safe error to surface once every option in the chain has failed. */
+function chainFailure(
+  chain: ProviderAdapter[],
+  explicitPick: boolean,
+  lastIndex: number,
+  firstError: unknown,
+  lastError: unknown
+): UserFacingError {
+  const first = chain[0];
+  if (!first) return describeProviderFailure(lastError, "The model");
+
+  if (explicitPick) {
+    const label = labelFor(first.id);
+    if (lastIndex > 0) {
+      return new UserFacingError(
+        `${label} is at its usage limit right now, and no other model could take over. ` +
+          `Please try again in a minute.`,
+        { cause: lastError }
+      );
+    }
+    return describeProviderFailure(firstError, label);
+  }
+
+  if (lastError instanceof UserFacingError) return lastError;
+  if (chain.length === 1) return describeProviderFailure(lastError, labelFor(first.id));
+  return new UserFacingError(
+    "None of the available models could answer right now. Please try again shortly.",
+    { cause: lastError }
   );
-  throw lastError;
 }
 
 export async function route(
@@ -251,10 +329,17 @@ export async function route(
   accountId: string,
   ctx?: RouteUsageContext
 ): Promise<RouteResponse> {
-  const chain = request.providerId
-    ? await resolveExplicitProvider(request.providerId, taskType, accountId, ctx)
-    : await resolveChain(taskType, accountId, ctx);
-  return walkChain(chain, accountId, taskType, (adapter) => adapter.call(request, accountId), undefined, ctx);
+  const { chain, explicitPick } = await resolveRouteChain(request, taskType, accountId, ctx);
+  return walkChain(
+    chain,
+    request,
+    accountId,
+    taskType,
+    (adapter, planned) => adapter.call(planned, accountId),
+    undefined,
+    ctx,
+    explicitPick
+  );
 }
 
 /**
@@ -273,17 +358,25 @@ export async function routeStream(
   onStage?: (event: StageEvent) => void,
   ctx?: RouteUsageContext
 ): Promise<RouteResponse> {
-  const chain = request.providerId
-    ? await resolveExplicitProvider(request.providerId, taskType, accountId, ctx)
-    : await resolveChain(taskType, accountId, ctx);
+  const { chain, explicitPick } = await resolveRouteChain(request, taskType, accountId, ctx);
   return walkChain(
     chain,
+    request,
     accountId,
     taskType,
-    (adapter) => adapter.streamCall(request, onDelta, accountId),
+    (adapter, planned) =>
+      adapter.streamCall(planned, onDelta, accountId, (inputTokens) => {
+        onStage?.({ stage: "generating", provider: adapter.id, inputTokens });
+      }),
     (adapter, attemptIndex) => {
-      onStage?.({ stage: "route", provider: adapter.id, attempt: attemptIndex });
+      onStage?.({
+        stage: "route",
+        provider: adapter.id,
+        attempt: attemptIndex,
+        pick: explicitPick ? "explicit" : "auto",
+      });
     },
-    ctx
+    ctx,
+    explicitPick
   );
 }

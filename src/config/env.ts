@@ -26,6 +26,9 @@ export type Env = {
   adminOperatorsReadRateLimitPerMin: number;
   /** Max mutating /admin/admins* calls per admin per minute. */
   adminOperatorsMutationRateLimitPerMin: number;
+  razorpayKeyId: string | undefined;
+  razorpayKeySecret: string | undefined;
+  razorpayWebhookSecret: string | undefined;
 };
 
 function splitOrigins(value: string | undefined, fallback: string): string[] {
@@ -82,6 +85,9 @@ export function loadEnv(): Env {
       process.env.ADMIN_OPERATORS_MUTATION_RATE_LIMIT_PER_MIN,
       30
     ),
+    razorpayKeyId: process.env.RAZORPAY_KEY_ID?.trim() || undefined,
+    razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET?.trim() || undefined,
+    razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || undefined,
   };
 }
 

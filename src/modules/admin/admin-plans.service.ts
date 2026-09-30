@@ -28,6 +28,8 @@ export type AdminPlanEntry = {
   tagline: string | null;
   highlights: string[];
   selfServe: boolean;
+  recurringGrantCredits: number;
+  recurringGrantPeriodHours: number | null;
 };
 
 type PlanRow = {
@@ -38,7 +40,12 @@ type PlanRow = {
   included_credits: number | null;
   rate_limit_rpm: number | null;
   features: Record<string, unknown> | string;
+  recurring_grant_credits: number;
+  recurring_grant_period_hours: number | null;
 };
+
+/** Only these periods are offered in the admin UI — keeps the "is it due" math a plain timestamp comparison, no calendar edge cases. */
+export const RECURRING_GRANT_PERIOD_HOURS = [24, 168, 720] as const;
 
 // Highlights are read-only here — computed from the feature catalog
 // (plan_features x feature_catalog, see plan-features.service.ts), not
@@ -56,6 +63,8 @@ function mapPlanRow(row: PlanRow, highlights: string[]): AdminPlanEntry {
     tagline: typeof features.tagline === "string" ? features.tagline : null,
     highlights,
     selfServe: features.self_serve !== false,
+    recurringGrantCredits: row.recurring_grant_credits,
+    recurringGrantPeriodHours: row.recurring_grant_period_hours,
   };
 }
 
@@ -74,7 +83,8 @@ export async function listPlansAdmin(): Promise<AdminPlanEntry[]> {
     const pool = getPool();
     const [result, highlightsByPlan] = await Promise.all([
       pool.query<PlanRow>(
-        `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features
+        `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features,
+                recurring_grant_credits, recurring_grant_period_hours
          FROM plans
          ORDER BY ${PLAN_ORDER_SQL}`
       ),
@@ -95,6 +105,27 @@ function nonNegativeIntOrNull(value: unknown, field: string): number | null {
   return value;
 }
 
+function nonNegativeInt(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new BillingPlanError(`${field} must be a non-negative integer`, "validation");
+  }
+  return value;
+}
+
+function recurringGrantPeriodHoursOrNull(value: unknown): number | null {
+  if (value === null) return null;
+  if (
+    typeof value !== "number" ||
+    !(RECURRING_GRANT_PERIOD_HOURS as readonly number[]).includes(value)
+  ) {
+    throw new BillingPlanError(
+      `recurringGrantPeriodHours must be null or one of ${RECURRING_GRANT_PERIOD_HOURS.join(", ")}`,
+      "validation"
+    );
+  }
+  return value;
+}
+
 export async function updatePlan(input: {
   actorId: string;
   key: string;
@@ -104,6 +135,8 @@ export async function updatePlan(input: {
   rateLimitRpm: number | null;
   tagline: string | null;
   selfServe: boolean;
+  recurringGrantCredits: number;
+  recurringGrantPeriodHours: number | null;
 }): Promise<AdminPlanEntry> {
   const displayName = input.displayName.trim();
   if (!displayName) {
@@ -113,11 +146,14 @@ export async function updatePlan(input: {
   const priceUsdCents = nonNegativeIntOrNull(input.priceUsdCents, "priceUsdCents");
   const includedCredits = nonNegativeIntOrNull(input.includedCredits, "includedCredits");
   const rateLimitRpm = nonNegativeIntOrNull(input.rateLimitRpm, "rateLimitRpm");
+  const recurringGrantCredits = nonNegativeInt(input.recurringGrantCredits, "recurringGrantCredits");
+  const recurringGrantPeriodHours = recurringGrantPeriodHoursOrNull(input.recurringGrantPeriodHours);
 
   try {
     return await withAdminTransaction(input.actorId, async (client: PoolClient) => {
       const current = await client.query<PlanRow>(
-        `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features
+        `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features,
+                recurring_grant_credits, recurring_grant_period_hours
          FROM plans WHERE key = $1 FOR UPDATE`,
         [input.key]
       );
@@ -140,10 +176,21 @@ export async function updatePlan(input: {
       const updated = await client.query<PlanRow>(
         `UPDATE plans
          SET display_name = $2, price_usd_cents = $3, included_credits = $4,
-             rate_limit_rpm = $5, features = $6::jsonb
+             rate_limit_rpm = $5, features = $6::jsonb,
+             recurring_grant_credits = $7, recurring_grant_period_hours = $8
          WHERE key = $1
-         RETURNING id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features`,
-        [input.key, displayName, priceUsdCents, includedCredits, rateLimitRpm, JSON.stringify(nextFeatures)]
+         RETURNING id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features,
+                   recurring_grant_credits, recurring_grant_period_hours`,
+        [
+          input.key,
+          displayName,
+          priceUsdCents,
+          includedCredits,
+          rateLimitRpm,
+          JSON.stringify(nextFeatures),
+          recurringGrantCredits,
+          recurringGrantPeriodHours,
+        ]
       );
 
       await appendAdminAudit(
@@ -152,7 +199,16 @@ export async function updatePlan(input: {
           action: "billing.update_plan",
           targetType: "plan",
           targetId: input.key,
-          meta: { displayName, priceUsdCents, includedCredits, rateLimitRpm, tagline, selfServe: input.selfServe },
+          meta: {
+            displayName,
+            priceUsdCents,
+            includedCredits,
+            rateLimitRpm,
+            tagline,
+            selfServe: input.selfServe,
+            recurringGrantCredits,
+            recurringGrantPeriodHours,
+          },
         },
         client
       );
