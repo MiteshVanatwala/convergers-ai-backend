@@ -6,7 +6,29 @@ export function registerBillingRoutes(app: FastifyInstance): void {
 
   app.get("/v1/billing/summary", (request, reply) => billingController.summary(request, reply));
 
-  app.post<{ Body: { packageId?: string } }>("/v1/billing/credit-purchases", (request, reply) =>
+  app.get<{ Querystring: { target?: string } }>("/v1/billing/profile", (request, reply) =>
+    billingController.getProfile(request, reply)
+  );
+
+  app.put<{
+    Body: {
+      target?: string;
+      legalName?: string;
+      gstin?: string | null;
+      address?: string | null;
+      city?: string | null;
+      postalCode?: string | null;
+      stateCode?: string | null;
+    };
+  }>("/v1/billing/profile", (request, reply) => billingController.saveProfile(request, reply));
+
+  app.get("/v1/billing/invoices", (request, reply) => billingController.listInvoices(request, reply));
+
+  app.get<{ Params: { id: string } }>("/v1/billing/invoices/:id/html", (request, reply) =>
+    billingController.invoiceHtml(request, reply)
+  );
+
+  app.post<{ Body: { packageId?: string; target?: string } }>("/v1/billing/credit-purchases", (request, reply) =>
     billingController.createPurchase(request, reply)
   );
 
@@ -14,6 +36,25 @@ export function registerBillingRoutes(app: FastifyInstance): void {
     "/v1/billing/credit-purchases/:orderId/verify",
     (request, reply) => billingController.verifyPurchase(request, reply)
   );
+
+  app.get("/v1/billing/auto-topup", (request, reply) => billingController.getAutoTopUp(request, reply));
+
+  app.post<{ Body: { packageId?: string; thresholdCredits?: number; contact?: string } }>(
+    "/v1/billing/auto-topup/setup",
+    (request, reply) => billingController.setupAutoTopUp(request, reply)
+  );
+
+  app.post<{ Params: { orderId: string }; Body: { paymentId?: string; signature?: string } }>(
+    "/v1/billing/auto-topup/setup/:orderId/verify",
+    (request, reply) => billingController.verifyAutoTopUpSetup(request, reply)
+  );
+
+  app.patch<{ Body: { packageId?: string; thresholdCredits?: number; enabled?: boolean } }>(
+    "/v1/billing/auto-topup",
+    (request, reply) => billingController.updateAutoTopUp(request, reply)
+  );
+
+  app.delete("/v1/billing/auto-topup", (request, reply) => billingController.removeAutoTopUp(request, reply));
 
   app.post("/v1/billing/subscriptions", (request, reply) => billingController.createSubscription(request, reply));
 

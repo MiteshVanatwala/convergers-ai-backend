@@ -20,6 +20,7 @@ import * as usageLog from "../usageLog";
 import * as usageService from "../../usage/usage.service";
 import { UserFacingError, describeProviderFailure, isCapacityError } from "./errors";
 import { BYOK_FEE_CREDITS, planAttempt } from "./credits";
+import { getOrgPolicyForAccount } from "../../orgs/orgs.service";
 
 /**
  * Every known adapter, keyed by the exact id used as `provider_registry.id`
@@ -139,6 +140,8 @@ export type StageEvent =
 /** Optional chat context so usage_events can store conversation_id. */
 export type RouteUsageContext = {
   conversationId?: string | null;
+  /** What the sensitive-data filter masked in this request — counts and kinds only. */
+  redaction?: { count: number; types: string[] };
 };
 
 const emptyUsage = { inputTokens: 0, outputTokens: 0, nativeCost: 0, creditsCharged: 0, fallbackUsed: false };
@@ -209,13 +212,36 @@ async function resolveRouteChain(
   accountId: string,
   ctx?: RouteUsageContext
 ): Promise<{ chain: ProviderAdapter[]; explicitPick: boolean }> {
+  const policy = await getOrgPolicyForAccount(accountId);
+  const allowed = policy?.allowedModelIds ? new Set(policy.allowedModelIds) : null;
+
   if (request.providerId) {
+    if (allowed && !allowed.has(request.providerId)) {
+      await persistError(accountId, taskType, request.providerId, ctx);
+      throw new UserFacingError(
+        `${labelFor(request.providerId)} isn't allowed in ${policy?.orgName}. Pick another model or use Auto.`
+      );
+    }
+    const chain = await resolveExplicitProvider(request.providerId, taskType, accountId, ctx);
     return {
-      chain: await resolveExplicitProvider(request.providerId, taskType, accountId, ctx),
+      chain: allowed ? chain.filter((a) => allowed.has(a.id)) : chain,
       explicitPick: true,
     };
   }
-  return { chain: await resolveChain(taskType, accountId, ctx), explicitPick: false };
+
+  const chain = await resolveChain(taskType, accountId, ctx);
+  if (!allowed) return { chain, explicitPick: false };
+
+  // Org admins restricted the models — only route among the allowed ones.
+  const permitted = chain.filter((a) => allowed.has(a.id));
+  if (permitted.length === 0) {
+    await persistError(accountId, taskType, "org_policy", ctx);
+    throw new UserFacingError(
+      `None of the models allowed in ${policy?.orgName} can handle this kind of request (${taskType}). ` +
+        `Ask an admin to allow more models.`
+    );
+  }
+  return { chain: permitted, explicitPick: false };
 }
 
 /**
@@ -258,6 +284,8 @@ async function walkChain(
         nativeCost: response.native_cost,
         creditsRequested: credits,
         fallbackUsed: i > 0,
+        redactedCount: ctx?.redaction?.count ?? 0,
+        redactedTypes: ctx?.redaction?.types ?? null,
       });
       usageLog.record({
         accountId,

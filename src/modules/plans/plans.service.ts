@@ -26,6 +26,8 @@ export type PlanCatalogRow = {
   key: string;
   display_name: string;
   price_usd_cents: number | null;
+  /** Charged price (Razorpay is INR); preferred over price_usd_cents for display. */
+  price_inr_paise: number | null;
   included_credits: number | null;
   rate_limit_rpm: number | null;
   features: Record<string, unknown>;
@@ -255,6 +257,7 @@ export async function listCatalogPlans(): Promise<PlanCatalogRow[]> {
         key: string;
         display_name: string;
         price_usd_cents: number | null;
+        price_inr_paise: number | null;
         included_credits: number | null;
         rate_limit_rpm: number | null;
         features: Record<string, unknown> | string;
@@ -262,7 +265,7 @@ export async function listCatalogPlans(): Promise<PlanCatalogRow[]> {
       Map<string, string[]>,
     ] = await Promise.all([
       pool.query(
-        `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features
+        `SELECT id, key, display_name, price_usd_cents, price_inr_paise, included_credits, rate_limit_rpm, features
          FROM plans
          ORDER BY CASE key
            WHEN 'free' THEN 1
@@ -280,6 +283,7 @@ export async function listCatalogPlans(): Promise<PlanCatalogRow[]> {
       key: row.key,
       display_name: row.display_name,
       price_usd_cents: row.price_usd_cents,
+      price_inr_paise: row.price_inr_paise,
       included_credits: row.included_credits,
       rate_limit_rpm: row.rate_limit_rpm,
       // Highlights are computed from the feature catalog (plan_features x
@@ -299,6 +303,7 @@ export function mapCatalogPlan(row: PlanCatalogRow) {
     key: row.key,
     displayName: row.display_name,
     priceUsdCents: row.price_usd_cents,
+    priceInrPaise: row.price_inr_paise,
     includedCredits: row.included_credits,
     rateLimitRpm: row.rate_limit_rpm,
     features: row.features,

@@ -2,6 +2,7 @@ import type { QueryResult } from "pg";
 import { getPool } from "../../infrastructure/db/pool";
 import { logCaught } from "../../shared/utils/log";
 import { getBalance } from "../ledger/ledger.service";
+import { getSpendable } from "../ledger/spend.service";
 
 const PURCHASE_HISTORY_LIMIT = 20;
 
@@ -10,6 +11,7 @@ export type BillingSummary = {
     key: string;
     displayName: string;
     priceUsdCents: number | null;
+    priceInrPaise: number | null;
     includedCredits: number | null;
     rateLimitRpm: number | null;
     /** Free credits topped up automatically every `recurringGrantPeriodHours` (0 = none). */
@@ -18,6 +20,16 @@ export type BillingSummary = {
     startedAt: string;
   } | null;
   balance: number;
+  /** Set when the account is in an organization — its requests spend the shared pool, not `balance`. */
+  org: {
+    name: string;
+    role: string;
+    poolBalance: number;
+    /** What this member can spend right now (pool, capped by their monthly limit). */
+    available: number;
+    monthlyLimit: number | null;
+    spentThisMonth: number;
+  } | null;
   /** When the next recurring grant is due, if the plan has one. */
   nextGrantAt: string | null;
   /** Most recent Razorpay subscription (Pro), excluding never-completed checkouts. */
@@ -42,6 +54,7 @@ type PlanRow = {
   key: string;
   display_name: string;
   price_usd_cents: number | null;
+  price_inr_paise: number | null;
   included_credits: number | null;
   rate_limit_rpm: number | null;
   recurring_grant_credits: number;
@@ -55,7 +68,7 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
     const pool = getPool();
     // getBalance first: it applies any due recurring grant, which moves
     // last_recurring_grant_at — read the plan row after so nextGrantAt is current.
-    const balance = await getBalance(accountId);
+    const [balance, spendable] = await Promise.all([getBalance(accountId), getSpendable(accountId)]);
 
     const [planResult, subscriptionResult, purchasesResult]: [
       QueryResult<PlanRow>,
@@ -70,7 +83,7 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
       }>,
     ] = await Promise.all([
       pool.query(
-        `SELECT p.key, p.display_name, p.price_usd_cents, p.included_credits, p.rate_limit_rpm,
+        `SELECT p.key, p.display_name, p.price_usd_cents, p.price_inr_paise, p.included_credits, p.rate_limit_rpm,
                 p.recurring_grant_credits, p.recurring_grant_period_hours,
                 ap.started_at, w.last_recurring_grant_at
          FROM account_plans ap
@@ -116,6 +129,7 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
             key: plan.key,
             displayName: plan.display_name,
             priceUsdCents: plan.price_usd_cents,
+            priceInrPaise: plan.price_inr_paise,
             includedCredits: plan.included_credits,
             rateLimitRpm: plan.rate_limit_rpm,
             recurringGrantCredits: plan.recurring_grant_credits,
@@ -124,6 +138,17 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
           }
         : null,
       balance,
+      org:
+        spendable.context.kind === "org"
+          ? {
+              name: spendable.context.orgName,
+              role: spendable.context.role,
+              poolBalance: spendable.poolBalance ?? 0,
+              available: spendable.balance,
+              monthlyLimit: spendable.context.monthlyLimit,
+              spentThisMonth: spendable.spentThisMonth ?? 0,
+            }
+          : null,
       nextGrantAt,
       subscription: subscription
         ? {

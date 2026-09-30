@@ -1,5 +1,6 @@
 import type { RouteRequest } from "@convergers-ai/shared-types";
-import { CREDITS_PER_USD, creditsForCost, getBalance } from "../../ledger/ledger.service";
+import { CREDITS_PER_USD, creditsForCost } from "../../ledger/ledger.service";
+import { getSpendable } from "../../ledger/spend.service";
 import { hasOwnKey } from "../adapters/accountKeyResolver";
 import { PRICING } from "../adapters/pricing";
 import type { BrainRequest, ProviderAdapter } from "../adapters/types";
@@ -50,11 +51,11 @@ export async function planAttempt(
   accountId: string,
   label: string
 ): Promise<AttemptPlan> {
-  const [byok, balance] = await Promise.all([
+  const [byok, spendable] = await Promise.all([
     hasOwnKey(adapter.keyProviderId, accountId),
-    getBalance(accountId),
+    getSpendable(accountId),
   ]);
-  return priceAttempt(adapter, request, { byok, balance, label });
+  return priceAttempt(adapter, request, { byok, balance: spendable.balance, label });
 }
 
 /** Pure pricing decision for one attempt, given whose key it runs on and the balance. */

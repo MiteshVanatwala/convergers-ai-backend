@@ -9,10 +9,13 @@ export type CreditPackage = {
   credits: number;
 };
 
+// 1,000 credits = $1 of provider cost (ledger CREDITS_PER_USD). Sized so each
+// pack sells above cost after GST and gateway fees — the previous 6,000 /
+// 13,000-credit packs sold credits below cost.
 export const CREDIT_PACKAGES: CreditPackage[] = [
-  { id: "starter", label: "₹99 — 1,000 credits", amountInrPaise: 9_900, credits: 1_000 },
-  { id: "plus", label: "₹499 — 6,000 credits", amountInrPaise: 49_900, credits: 6_000 },
-  { id: "pro", label: "₹999 — 13,000 credits", amountInrPaise: 99_900, credits: 13_000 },
+  { id: "starter", label: "₹99 — 700 credits", amountInrPaise: 9_900, credits: 700 },
+  { id: "plus", label: "₹499 — 3,500 credits", amountInrPaise: 49_900, credits: 3_500 },
+  { id: "pro", label: "₹999 — 7,500 credits", amountInrPaise: 99_900, credits: 7_500 },
 ];
 
 export function findCreditPackage(id: string): CreditPackage | undefined {

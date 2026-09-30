@@ -17,6 +17,8 @@ export type RedactionResult = {
   redactedTexts: string[];
   /** placeholder ("[REDACT_1]") -> original sensitive value */
   map: Map<string, string>;
+  /** Distinct masked values per kind (e.g. { email: 2, aadhaar: 1 }) — for reporting; never the values. */
+  typeCounts: Record<string, number>;
 };
 
 function escapeRegExp(value: string): string {
@@ -29,14 +31,20 @@ function escapeRegExp(value: string): string {
  * turn is masked in every turn, even where its context keyword is missing.
  */
 export function detectAndRedact(texts: string[]): RedactionResult {
-  const values = new Set<string>();
+  // value → kind of the first detection, so each distinct value counts once.
+  const typeByValue = new Map<string, string>();
   for (const text of texts) {
-    for (const span of findSensitiveSpans(text)) values.add(span.value);
+    for (const span of findSensitiveSpans(text)) {
+      if (!typeByValue.has(span.value)) typeByValue.set(span.value, span.type);
+    }
   }
+  const values = new Set(typeByValue.keys());
+  const typeCounts: Record<string, number> = {};
+  for (const type of typeByValue.values()) typeCounts[type] = (typeCounts[type] ?? 0) + 1;
 
   const map = new Map<string, string>();
   if (values.size === 0) {
-    return { redactedTexts: [...texts], map };
+    return { redactedTexts: [...texts], map, typeCounts };
   }
 
   // Longest first so a short match can't win over a longer one that contains it.
@@ -54,7 +62,7 @@ export function detectAndRedact(texts: string[]): RedactionResult {
     text.replace(pattern, (match) => placeholderFor.get(match) ?? match)
   );
 
-  return { redactedTexts, map };
+  return { redactedTexts, map, typeCounts };
 }
 
 export function restoreSensitiveData(text: string, map: Map<string, string>): string {
@@ -65,11 +73,17 @@ export function restoreSensitiveData(text: string, map: Map<string, string>): st
   return restored;
 }
 
+/** On if the user turned it on, or their organization requires it for every member. */
 export async function isSensitiveFilterEnabled(accountId: string): Promise<boolean> {
   const pool = getPool();
-  const result: QueryResult<{ filter_sensitive_data: boolean }> = await pool.query(
-    `SELECT filter_sensitive_data FROM personalization_settings WHERE account_id = $1`,
+  const result: QueryResult<{ enabled: boolean }> = await pool.query(
+    `SELECT COALESCE(ps.filter_sensitive_data, false)
+            OR COALESCE(o.enforce_sensitive_filter, false) AS enabled
+     FROM (SELECT $1::text AS account_id) me
+     LEFT JOIN personalization_settings ps ON ps.account_id::text = me.account_id
+     LEFT JOIN organization_members m ON m.account_id::text = me.account_id
+     LEFT JOIN organizations o ON o.id = m.org_id`,
     [accountId]
   );
-  return result.rows[0]?.filter_sensitive_data ?? false;
+  return result.rows[0]?.enabled ?? false;
 }

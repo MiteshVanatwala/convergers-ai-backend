@@ -7,6 +7,8 @@ import {
   requireAdminOperatorsReadRateLimit,
 } from "../../infrastructure/http/middleware/admin-rate-limit";
 import { AdminPermission } from "./admin-permissions";
+import * as setupController from "./admin-setup.controller";
+import * as invoicingController from "./admin-invoicing.controller";
 import * as adminController from "./admin.controller";
 import * as adminAuthController from "./admin-auth.controller";
 import * as operatorsController from "./admin-operators.controller";
@@ -179,6 +181,25 @@ export function registerAdminRoutes(app: FastifyInstance): void {
     );
 
     adminApp.get("/admin/stats", (request, reply) => adminController.stats(request, reply));
+
+    adminApp.get("/admin/setup", { preHandler: requireViewProviderHealth }, (request, reply) =>
+      setupController.getSetup(request, reply)
+    );
+
+    adminApp.get("/admin/settings/invoicing", { preHandler: requireManagePlans }, (request, reply) =>
+      invoicingController.getInvoicing(request, reply)
+    );
+    adminApp.put<{
+      Body: {
+        legalName?: string | null;
+        gstin?: string | null;
+        address?: string | null;
+        sacCode?: string | null;
+        invoicePrefix?: string | null;
+      };
+    }>("/admin/settings/invoicing", { preHandler: requireManagePlans }, (request, reply) =>
+      invoicingController.saveInvoicing(request, reply)
+    );
 
     adminApp.get(
       "/admin/providers/credentials",

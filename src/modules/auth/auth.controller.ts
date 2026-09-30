@@ -13,6 +13,7 @@ import { logCaught } from "../../shared/utils/log";
 import * as authService from "./auth.service";
 import type { AccountRow, SessionAccount } from "./types";
 import * as plansService from "../plans/plans.service";
+import { getOrgPolicyForAccount } from "../orgs/orgs.service";
 import type { GoogleOAuthConfig } from "./google.oauth";
 import {
   buildGoogleAuthorizeUrl,
@@ -166,9 +167,10 @@ async function mapMe(account: {
   impersonated_by?: string | null;
   impersonator_label?: string | null;
 }) {
-  const [membership, personalization] = await Promise.all([
+  const [membership, personalization, orgPolicy] = await Promise.all([
     plansService.getOrEnsureActivePlan(account.id),
     authService.getPersonalizationSettings(account.id),
+    getOrgPolicyForAccount(account.id),
   ]);
   return {
     id: account.id,
@@ -180,6 +182,15 @@ async function mapMe(account: {
     plan: plansService.mapAuthPlan(membership),
     defaultModelId: personalization.defaultModelId,
     filterSensitiveData: personalization.filterSensitiveData,
+    org: orgPolicy
+      ? {
+          id: orgPolicy.orgId,
+          name: orgPolicy.orgName,
+          role: orgPolicy.role,
+          enforceSensitiveFilter: orgPolicy.enforceSensitiveFilter,
+          planKey: orgPolicy.planKey,
+        }
+      : null,
     impersonatedBy: account.impersonated_by
       ? { adminId: account.impersonated_by, adminLabel: account.impersonator_label ?? "an admin" }
       : null,

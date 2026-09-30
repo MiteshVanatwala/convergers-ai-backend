@@ -11,6 +11,8 @@ export const LedgerReason = {
   REVERSAL: "reversal",
   PROMO: "promo",
   ADMIN_GRANT: "admin_grant",
+  /** A paid subscription's included credits, granted on each successful charge. */
+  SUBSCRIPTION_GRANT: "subscription_grant",
 } as const;
 
 export type LedgerReasonValue = (typeof LedgerReason)[keyof typeof LedgerReason];
@@ -20,4 +22,6 @@ export const LedgerReferenceType = {
   RECURRING_GRANT: "recurring_grant",
   USAGE_EVENT: "usage_event",
   CREDIT_PURCHASE: "credit_purchase",
+  /** reference_id = Razorpay payment id of the subscription charge. */
+  SUBSCRIPTION_PAYMENT: "subscription_payment",
 } as const;

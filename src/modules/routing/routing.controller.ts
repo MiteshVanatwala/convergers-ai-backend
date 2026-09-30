@@ -12,7 +12,8 @@ import {
   handleStreamRequest,
   userFacingPayload,
 } from "../brain";
-import { getBalance } from "../ledger/ledger.service";
+import { getSpendable } from "../ledger/spend.service";
+import { getOrgPolicyForAccount } from "../orgs/orgs.service";
 import { getPool } from "../../infrastructure/db/pool";
 import { isConfigured } from "../brain/adapters/keyStore";
 import { getOrEnsureActivePlan, listCatalogPlans, PLAN_KEY_ORDER } from "../plans/plans.service";
@@ -36,7 +37,7 @@ export async function models(request: FastifyRequest, reply: FastifyReply) {
       (row) => row.key_provider_id != null && isConfigured(row.key_provider_id)
     );
 
-    const [ownKeysResult, plan, tierResult, catalogPlans] = await Promise.all([
+    const [ownKeysResult, plan, tierResult, catalogPlans, orgPolicy] = await Promise.all([
       pool.query<{ provider_id: string }>(
         `SELECT DISTINCT provider_id FROM provider_api_keys WHERE account_id = $1 AND is_active = true`,
         [account.id]
@@ -49,7 +50,9 @@ export async function models(request: FastifyRequest, reply: FastifyReply) {
           )
         : Promise.resolve({ rows: [] as { provider_id: string; plan_key: string }[] }),
       listCatalogPlans(),
+      getOrgPolicyForAccount(account.id),
     ]);
+    const orgAllowed = orgPolicy?.allowedModelIds ? new Set(orgPolicy.allowedModelIds) : null;
 
     const ownKeyProviderIds = new Set(ownKeysResult.rows.map((r) => r.provider_id));
     const allowedPlanKeysByModel = new Map<string, Set<string>>();
@@ -61,6 +64,15 @@ export async function models(request: FastifyRequest, reply: FastifyReply) {
     const planDisplayNameByKey = new Map(catalogPlans.map((p) => [p.key, p.display_name]));
 
     const items = rows.map((row) => {
+      // Org policy wins over plan tier and own keys — admins decide which models members use.
+      if (orgAllowed && !orgAllowed.has(row.id)) {
+        return {
+          id: row.id,
+          label: row.label,
+          locked: true,
+          unlockHint: `Not allowed in ${orgPolicy?.orgName}`,
+        };
+      }
       const hasOwnKey = row.key_provider_id != null && ownKeyProviderIds.has(row.key_provider_id);
       const allowedPlanKeys = allowedPlanKeysByModel.get(row.id) ?? new Set<string>();
       const tierOk = allowedPlanKeys.has(plan.key);
@@ -149,10 +161,20 @@ export async function credits(request: FastifyRequest, reply: FastifyReply) {
   const account = await requireSession(request, reply);
   if (!account) return;
   try {
-    const balance = await getBalance(account.id);
+    const spendable = await getSpendable(account.id);
     return ok(reply, AppStatus.CREDITS_RETRIEVED, {
       accountId: account.id,
-      balance,
+      /** What this account can spend now — for org members, the pool within their monthly limit. */
+      balance: spendable.balance,
+      source: spendable.context.kind,
+      ...(spendable.context.kind === "org"
+        ? {
+            orgName: spendable.context.orgName,
+            poolBalance: spendable.poolBalance,
+            monthlyLimit: spendable.context.monthlyLimit,
+            spentThisMonth: spendable.spentThisMonth,
+          }
+        : {}),
     });
   } catch (error: unknown) {
     logCaught("routing.controller.credits", error);
