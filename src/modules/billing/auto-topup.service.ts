@@ -317,7 +317,7 @@ export async function maybeAutoTopUp(accountId: string, balance: number): Promis
         customer_id: charge.customerId,
         token: charge.tokenId,
         recurring: "1",
-        description: "Convergers AI credits (auto top-up)",
+        description: "Aikya credits (auto top-up)",
         notes: { accountId, purpose: "auto_topup" },
       });
       // Credits arrive with the payment.captured webhook.

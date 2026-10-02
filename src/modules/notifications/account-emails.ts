@@ -52,10 +52,10 @@ function renderHtml(input: EmailContent): string {
     : "";
   return `<!doctype html><html><body style="margin:0;padding:24px;background:#f7f4ef;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
 <div style="max-width:520px;margin:0 auto;padding:28px;border-radius:14px;background:#ffffff;border:1px solid #ece6dd">
-<p style="margin:0 0 18px;font-size:16px;font-weight:700;color:#2b2420">Convergers <span style="color:#d9622b">AI</span></p>
+<p style="margin:0 0 18px;font-size:18px;font-weight:800;letter-spacing:-0.02em;color:#2b2420">Aikya<span style="color:#d9622b">.</span></p>
 <p style="margin:0 0 14px;font-size:15px;line-height:1.55;color:#2b2420">${escapeHtml(input.greeting)}</p>
 ${body}${highlight}${footnote}${cta}
-<p style="margin:22px 0 0;font-size:12px;color:#8a7f74">You're receiving this because of activity on your Convergers AI account.</p>
+<p style="margin:22px 0 0;font-size:12px;color:#8a7f74">You're receiving this because of activity on your Aikya account.</p>
 </div></body></html>`;
 }
 
@@ -67,7 +67,7 @@ function renderText(input: EmailContent): string {
     ...(input.highlight ? [input.highlight, ""] : []),
     ...(input.footnote ? [input.footnote, ""] : []),
     ...(input.cta ? [`${input.cta.label}: ${input.cta.url}`, ""] : []),
-    "— Convergers AI",
+    "— Aikya",
   ].join("\n");
 }
 
@@ -85,9 +85,9 @@ function fireAndForget(label: string, task: () => Promise<void>): void {
  * throws — the caller must tell the person if the code couldn't be sent.
  */
 export async function sendLoginCodeEmail(email: string, code: string, ttlMinutes: number): Promise<void> {
-  await deliver(email, `${code} is your Convergers AI sign-in code`, {
+  await deliver(email, `${code} is your Aikya sign-in code`, {
     greeting: "Hi,",
-    paragraphs: ["Use this code to sign in to Convergers AI:"],
+    paragraphs: ["Use this code to sign in to Aikya:"],
     highlight: code,
     footnote: `It expires in ${ttlMinutes} minutes and can be used once. If you didn't try to sign in, you can ignore this email — nobody can get in without the code.`,
   });
@@ -97,10 +97,10 @@ export async function sendLoginCodeEmail(email: string, code: string, ttlMinutes
 export function sendWelcomeEmail(recipient: Recipient): void {
   fireAndForget("welcome", async () => {
     const credits = loadEnv().signupGrantCredits;
-    await deliver(recipient.email, "Welcome to Convergers AI", {
+    await deliver(recipient.email, "Welcome to Aikya", {
       greeting: `Hi ${firstName(recipient)},`,
       paragraphs: [
-        "Welcome to Convergers AI — one chat that routes every request to the model best suited for it.",
+        "Welcome to Aikya — one chat that routes every request to the model best suited for it.",
         credits > 0
           ? `Your account is on the Free plan with ${credits.toLocaleString("en-IN")} trial credits, so you can start right away.`
           : "Your account is on the Free plan, so you can start right away.",
@@ -139,25 +139,25 @@ export function sendPlanChangeEmail(input: { accountId: string; fromKey: string 
 
     const paragraphs = upgrade
       ? [
-          `Your Convergers AI account has been upgraded${fromName ? ` from ${fromName}` : ""} to ${toName}.`,
+          `Your Aikya account has been upgraded${fromName ? ` from ${fromName}` : ""} to ${toName}.`,
           input.toKey === "pro"
             ? "Your monthly credits are added to your balance each billing cycle. You can see your plan and invoices under Settings → Plan & billing."
             : "You can see your plan and invoices under Settings → Plan & billing.",
         ]
       : downgrade
         ? [
-            `Your Convergers AI account has moved${fromName ? ` from ${fromName}` : ""} to ${toName}.`,
+            `Your Aikya account has moved${fromName ? ` from ${fromName}` : ""} to ${toName}.`,
             "Any credits already in your balance stay there. If this wasn't expected — for example a payment didn't go through — you can upgrade again any time under Plans.",
           ]
         : [
-            `Your Convergers AI account has switched${fromName ? ` from ${fromName}` : ""} to ${toName}.`,
+            `Your Aikya account has switched${fromName ? ` from ${fromName}` : ""} to ${toName}.`,
             "Your existing credit balance carries over.",
           ];
 
     await deliver(recipient.email, subject, {
       greeting: `Hi ${firstName(recipient)},`,
       paragraphs,
-      cta: { label: upgrade ? "Open Convergers AI" : "View plans", url: settingsUrl },
+      cta: { label: upgrade ? "Open Aikya" : "View plans", url: settingsUrl },
     });
   });
 }

@@ -160,8 +160,8 @@ async function loadInvoiceLine(client: PoolClient, source: InvoiceSource): Promi
       accountId: row.account_id,
       orgId: row.org_id,
       description: row.org_id
-        ? `Convergers AI credits — ${credits} credits (organization pool)`
-        : `Convergers AI credits — ${credits} credits`,
+        ? `Aikya credits — ${credits} credits (organization pool)`
+        : `Aikya credits — ${credits} credits`,
       quantity: 1,
       unitAmountPaise: row.amount,
     };
@@ -191,8 +191,8 @@ async function loadInvoiceLine(client: PoolClient, source: InvoiceSource): Promi
     accountId: row.grant_account_id,
     orgId: row.org_id,
     description: row.org_id
-      ? `Convergers AI ${row.plan_name} plan — monthly, per seat`
-      : `Convergers AI ${row.plan_name} plan — monthly subscription`,
+      ? `Aikya ${row.plan_name} plan — monthly, per seat`
+      : `Aikya ${row.plan_name} plan — monthly subscription`,
     quantity,
     unitAmountPaise: unit,
   };

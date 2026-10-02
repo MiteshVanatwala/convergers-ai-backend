@@ -53,7 +53,7 @@ export type Env = {
       pass: string | undefined;
     };
     resendApiKey: string | undefined;
-    /** Sender, e.g. "Convergers AI <noreply@convergers.ai>". Falls back to SMTP_FROM. */
+    /** Sender, e.g. "Aikya <noreply@convergers.ai>". Falls back to SMTP_FROM. */
     from: string | undefined;
     /** Where "Contact sales" submissions are emailed. */
     salesInbox: string;
