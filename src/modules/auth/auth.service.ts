@@ -53,9 +53,9 @@ export async function upsertGoogleAccount(input: {
   emailVerified: boolean;
   name: string | null;
   pictureUrl: string | null;
-}): Promise<AccountRow> {
+}): Promise<AccountRow & { isNew: boolean }> {
   try {
-    return await withPoolTransaction(async (client: PoolClient): Promise<AccountRow> => {
+    return await withPoolTransaction(async (client: PoolClient): Promise<AccountRow & { isNew: boolean }> => {
       const byGoogleParams: [string] = [input.googleId];
       const byGoogle: QueryResult<AccountRow> = await client.query<AccountRow>(
         `SELECT id, email, name, avatar_url, auth_provider, status, created_at
@@ -83,7 +83,7 @@ export async function upsertGoogleAccount(input: {
         );
         await ensureWallet(updated.rows[0].id, client);
         await ensureFreePlanMembership(updated.rows[0].id, client, "migration");
-        return updated.rows[0];
+        return { ...updated.rows[0], isNew: false };
       }
 
       const byEmailParams: [string] = [input.email];
@@ -118,7 +118,7 @@ export async function upsertGoogleAccount(input: {
         );
         await ensureWallet(updated.rows[0].id, client);
         await ensureFreePlanMembership(updated.rows[0].id, client, "migration");
-        return updated.rows[0];
+        return { ...updated.rows[0], isNew: false };
       }
 
       const insertParams: [string, boolean, string, string | null, string | null] = [
@@ -140,10 +140,49 @@ export async function upsertGoogleAccount(input: {
       const created: AccountRow = inserted.rows[0];
       await grantSignupCredits(created.id, client);
       await ensureFreePlanMembership(created.id, client, "signup");
-      return created;
+      return { ...created, isNew: true };
     });
   } catch (error: unknown) {
     logCaught("auth.service.upsertGoogleAccount", error);
+    throw error;
+  }
+}
+
+/**
+ * Email-code sign-in: returns the account for this (now verified) email,
+ * creating it on first use the same way Google sign-up does (wallet, signup
+ * credits, Free plan). An existing Google account with this email is reused,
+ * so both sign-in methods land in one account.
+ */
+export async function upsertEmailAccount(email: string): Promise<AccountRow & { isNew: boolean }> {
+  try {
+    return await withPoolTransaction(async (client: PoolClient): Promise<AccountRow & { isNew: boolean }> => {
+      const existing: QueryResult<AccountRow> = await client.query<AccountRow>(
+        `UPDATE accounts
+         SET email_verified_at = COALESCE(email_verified_at, now()), updated_at = now()
+         WHERE email = $1
+         RETURNING id, email, name, avatar_url, auth_provider, status, created_at`,
+        [email]
+      );
+      if (existing.rows[0]) {
+        await ensureWallet(existing.rows[0].id, client);
+        await ensureFreePlanMembership(existing.rows[0].id, client, "migration");
+        return { ...existing.rows[0], isNew: false };
+      }
+
+      const inserted: QueryResult<AccountRow> = await client.query<AccountRow>(
+        `INSERT INTO accounts (email, email_verified_at, auth_provider, status)
+         VALUES ($1, now(), 'email', 'active')
+         RETURNING id, email, name, avatar_url, auth_provider, status, created_at`,
+        [email]
+      );
+      const created: AccountRow = inserted.rows[0];
+      await grantSignupCredits(created.id, client);
+      await ensureFreePlanMembership(created.id, client, "signup");
+      return { ...created, isNew: true };
+    });
+  } catch (error: unknown) {
+    logCaught("auth.service.upsertEmailAccount", error);
     throw error;
   }
 }

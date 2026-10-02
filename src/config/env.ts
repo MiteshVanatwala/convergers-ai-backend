@@ -39,6 +39,25 @@ export type Env = {
     /** Invoice number prefix, e.g. "CAI" → CAI2627-000001. Keep it short: GST caps invoice numbers at 16 chars. */
     invoicePrefix: string;
   };
+  /**
+   * Transactional email. SMTP is used when SMTP_HOST is set, else Resend when
+   * RESEND_API_KEY is set; with neither, email is off (callers skip sending).
+   */
+  email: {
+    smtp: {
+      host: string | undefined;
+      port: number;
+      /** true = TLS from the start (port 465); false = STARTTLS (port 587). */
+      secure: boolean;
+      user: string | undefined;
+      pass: string | undefined;
+    };
+    resendApiKey: string | undefined;
+    /** Sender, e.g. "Convergers AI <noreply@convergers.ai>". Falls back to SMTP_FROM. */
+    from: string | undefined;
+    /** Where "Contact sales" submissions are emailed. */
+    salesInbox: string;
+  };
 };
 
 function splitOrigins(value: string | undefined, fallback: string): string[] {
@@ -104,6 +123,18 @@ export function loadEnv(): Env {
       address: process.env.SELLER_ADDRESS?.trim() || undefined,
       sacCode: process.env.INVOICE_SAC_CODE?.trim() || undefined,
       invoicePrefix: (process.env.INVOICE_PREFIX?.trim() || "CAI").slice(0, 4).toUpperCase(),
+    },
+    email: {
+      smtp: {
+        host: process.env.SMTP_HOST?.trim() || undefined,
+        port: positiveInt(process.env.SMTP_PORT, 587),
+        secure: process.env.SMTP_SECURE === "true",
+        user: process.env.SMTP_USER?.trim() || undefined,
+        pass: process.env.SMTP_PASS || undefined,
+      },
+      resendApiKey: process.env.RESEND_API_KEY?.trim() || undefined,
+      from: process.env.EMAIL_FROM?.trim() || process.env.SMTP_FROM?.trim() || undefined,
+      salesInbox: process.env.SALES_INBOX_EMAIL?.trim() || "sales@convergers.ai",
     },
   };
 }

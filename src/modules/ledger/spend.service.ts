@@ -5,8 +5,10 @@ import { logCaught } from "../../shared/utils/log";
 import { getBalance } from "./ledger.service";
 
 /**
- * Whose credits a request spends. Members of an organization spend its shared
- * pool (subject to their monthly limit); everyone else spends their own wallet.
+ * Whose credits a request spends. Members of an organization on a paid plan
+ * (Team) spend its shared pool (subject to their monthly limit); everyone
+ * else — including members of an org that hasn't subscribed yet, or whose
+ * subscription ended — spends their own wallet.
  */
 export type SpendContext =
   | { kind: "personal"; accountId: string }
@@ -44,7 +46,7 @@ export async function getSpendContext(accountId: string, db: Queryable = getPool
       `SELECT m.org_id::text AS org_id, o.name AS org_name, m.role, m.monthly_credit_limit
        FROM organization_members m
        JOIN organizations o ON o.id = m.org_id
-       WHERE m.account_id::text = $1`,
+       WHERE m.account_id::text = $1 AND o.plan_id IS NOT NULL`,
       [accountId]
     );
     const row = result.rows[0];

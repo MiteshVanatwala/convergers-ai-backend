@@ -65,7 +65,7 @@ export function renderInvoiceHtml(inv: InvoiceRow): string {
   .notes { margin-top: 28px; font-size: 12px; color: #4b544f; }
   .sign { margin-top: 36px; text-align: right; font-size: 12px; color: #4b544f; }
   .print { text-align: center; margin: 16px; }
-  .print button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #1f7a6c; background: #1f7a6c; color: #fff; cursor: pointer; }
+  .print button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #ea580c; background: #ea580c; color: #fff; cursor: pointer; }
   @media print { body { background: #fff; } .sheet { margin: 0; border: none; border-radius: 0; padding: 0; } .print { display: none; } }
   @media (max-width: 640px) { .sheet { padding: 20px; margin: 0; border-radius: 0; } .parties { grid-template-columns: 1fr; } .totals { width: 100%; } }
 </style>

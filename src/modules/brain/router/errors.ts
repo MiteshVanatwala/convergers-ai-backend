@@ -51,6 +51,22 @@ export function isCapacityError(err: unknown): boolean {
   return status === 429 || status === 529;
 }
 
+/**
+ * How a provider call failed, for the admin model-status board — or null when
+ * the failure says nothing about the model's health (a message for the user,
+ * such as a plan or credit limit, or a provider with no key configured).
+ */
+export function classifyModelFailure(
+  err: unknown
+): { kind: "rate_limited" | "auth" | "error"; status: number | null } | null {
+  if (err instanceof UserFacingError) return null;
+  if (err instanceof Error && /isn't configured/.test(err.message)) return null;
+  const status = providerStatus(err) ?? null;
+  if (status === 429 || status === 529) return { kind: "rate_limited", status };
+  if (status === 401 || status === 403) return { kind: "auth", status };
+  return { kind: "error", status };
+}
+
 /** Friendly explanation of why `label` failed. Passes UserFacingErrors through unchanged. */
 export function describeProviderFailure(err: unknown, label: string): UserFacingError {
   if (err instanceof UserFacingError) return err;

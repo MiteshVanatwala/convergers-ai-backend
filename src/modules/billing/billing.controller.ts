@@ -10,7 +10,11 @@ import { requireSession } from "../../infrastructure/http/middleware/require-ses
 import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
 import { CREDIT_PACKAGES } from "./credit-packages";
-import { requireRazorpayWebhookSecret } from "./razorpay-client";
+import {
+  PAYMENTS_UNAVAILABLE_MESSAGE,
+  isPaymentsUnavailable,
+  requireRazorpayWebhookSecret,
+} from "./razorpay-client";
 import * as billingService from "./billing.service";
 import * as billingSummaryService from "./billing-summary.service";
 import * as invoicesService from "./invoices.service";
@@ -89,6 +93,9 @@ export async function createPurchase(
   } catch (error: unknown) {
     if (error instanceof BillingError) return failFromBillingError(reply, error);
     logCaught("billing.controller.createPurchase", error);
+    if (isPaymentsUnavailable(error)) {
+      return fail(reply, AppStatus.BILLING_PAYMENTS_UNAVAILABLE, PAYMENTS_UNAVAILABLE_MESSAGE, 503);
+    }
     return fail(reply, AppStatus.BILLING_PURCHASE_CREATE_FAILED, "Failed to start purchase", 500);
   }
 }
@@ -146,6 +153,9 @@ export async function createSubscription(request: FastifyRequest, reply: Fastify
   } catch (error: unknown) {
     if (error instanceof SubscriptionError) return failFromSubscriptionError(reply, error);
     logCaught("billing.controller.createSubscription", error);
+    if (isPaymentsUnavailable(error)) {
+      return fail(reply, AppStatus.BILLING_PAYMENTS_UNAVAILABLE, PAYMENTS_UNAVAILABLE_MESSAGE, 503);
+    }
     return fail(reply, AppStatus.BILLING_SUBSCRIPTION_CREATE_FAILED, "Failed to start subscription", 500);
   }
 }
@@ -397,6 +407,9 @@ export async function setupAutoTopUp(
   } catch (error: unknown) {
     if (error instanceof BillingError) return failFromAutoTopUpError(reply, error);
     logCaught("billing.controller.setupAutoTopUp", error);
+    if (isPaymentsUnavailable(error)) {
+      return fail(reply, AppStatus.BILLING_PAYMENTS_UNAVAILABLE, PAYMENTS_UNAVAILABLE_MESSAGE, 503);
+    }
     return fail(reply, AppStatus.BILLING_AUTO_TOPUP_FAILED, "Failed to start pay-as-you-go setup", 500);
   }
 }

@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { PAYMENTS_UNAVAILABLE_MESSAGE, isPaymentsUnavailable } from "../billing/razorpay-client";
 import { AppStatus } from "../../config/app-status-codes";
 import { requireSession } from "../../infrastructure/http/middleware/require-session";
 import { fail, ok } from "../../shared/http/api-response";
@@ -19,6 +20,7 @@ import { OrgError } from "./orgs.service";
 import {
   MAX_TEAM_SEATS,
   SubscriptionError,
+  cancelUnpaidRazorpaySubscriptions,
   changeTeamSeats,
   createTeamSubscription,
 } from "../billing/subscription.service";
@@ -37,7 +39,12 @@ function failFromOrgError(reply: FastifyReply, error: OrgError) {
     case "invite_wrong_account":
       return fail(reply, AppStatus.ORG_FORBIDDEN, error.message, 403);
     case "no_seats":
+    case "not_set_up":
+    case "has_plan":
+    case "has_history":
       return fail(reply, AppStatus.ORG_CONFLICT, error.message, 409);
+    case "org_not_found":
+      return fail(reply, AppStatus.ORG_NOT_FOUND, error.message, 404);
   }
 }
 
@@ -123,27 +130,28 @@ export async function getMyOrg(request: FastifyRequest, reply: FastifyReply) {
   }
 }
 
-export async function createOrg(
-  request: FastifyRequest<{ Body: { name?: string } }>,
-  reply: FastifyReply
-) {
+/**
+ * DELETE /v1/org — the owner cancels an org that never finished Team setup.
+ * Orgs are created only by Team checkout (startSubscription), so this is the
+ * way out of an abandoned checkout.
+ */
+export async function deleteOrg(request: FastifyRequest, reply: FastifyReply) {
   const account = await requireSession(request, reply);
   if (!account) return;
   try {
-    const name = typeof request.body?.name === "string" ? orgsService.normalizeOrgName(request.body.name) : null;
-    if (!name) {
-      return fail(reply, AppStatus.ORG_VALIDATION_FAILED, "Name must be 1–80 characters", 400);
+    const membership = await orgsService.getMembership(account.id);
+    if (!membership) return fail(reply, AppStatus.ORG_NOT_FOUND, "You're not in an organization.", 404);
+    if (membership.role !== "owner") {
+      return fail(reply, AppStatus.ORG_FORBIDDEN, "Only the owner can cancel the organization's setup.", 403);
     }
-    if (await orgsService.getMembership(account.id)) {
-      return fail(reply, AppStatus.ORG_CONFLICT, "You're already in an organization.", 409);
-    }
-    const org = await orgsService.createOrg(account.id, name);
-    return ok(reply, AppStatus.ORG_CREATED, { id: org.id, name: org.name }, 201);
+    const { pendingRazorpaySubscriptionIds } = await orgsService.deleteUnpaidOrg(membership.orgId);
+    await cancelUnpaidRazorpaySubscriptions(pendingRazorpaySubscriptionIds);
+    return ok(reply, AppStatus.ORG_DELETED, { ok: true });
   } catch (error: unknown) {
     if (error instanceof OrgError) return failFromOrgError(reply, error);
-    logCaught("orgs.controller.createOrg", error);
-    request.log.error({ err: error }, "[orgs.controller.createOrg] failed");
-    return fail(reply, AppStatus.ORG_UPDATE_FAILED, "Failed to create organization", 500);
+    logCaught("orgs.controller.deleteOrg", error);
+    request.log.error({ err: error }, "[orgs.controller.deleteOrg] failed");
+    return fail(reply, AppStatus.ORG_UPDATE_FAILED, "Failed to cancel organization setup", 500);
   }
 }
 
@@ -198,9 +206,13 @@ export async function createInvite(
     if (await orgsService.isEmailMember(membership.orgId, email)) {
       return fail(reply, AppStatus.ORG_CONFLICT, "That person is already a member.", 409);
     }
-    // On a paid Team plan every member and open invite takes a seat.
+    // Invites need a paid Team plan; every member and open invite takes a seat.
     const org = await orgsService.getOrg(membership.orgId);
-    if (org && org.seats > 0 && (await orgsService.countSeatsUsed(membership.orgId)) >= org.seats) {
+    if (!org) return fail(reply, AppStatus.ORG_NOT_FOUND, "Organization not found", 404);
+    if (org.seats === 0) {
+      return fail(reply, AppStatus.ORG_CONFLICT, "Subscribe to the Team plan before inviting people.", 409);
+    }
+    if ((await orgsService.countSeatsUsed(membership.orgId)) >= org.seats) {
       return fail(
         reply,
         AppStatus.ORG_CONFLICT,
@@ -453,6 +465,9 @@ export async function startSubscription(
     if (error instanceof OrgError) return failFromOrgError(reply, error);
     logCaught("orgs.controller.startSubscription", error);
     request.log.error({ err: error }, "[orgs.controller.startSubscription] failed");
+    if (isPaymentsUnavailable(error)) {
+      return fail(reply, AppStatus.BILLING_PAYMENTS_UNAVAILABLE, PAYMENTS_UNAVAILABLE_MESSAGE, 503);
+    }
     return fail(reply, AppStatus.ORG_UPDATE_FAILED, "Failed to start Team plan checkout", 500);
   }
 }

@@ -5,6 +5,7 @@ import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
 import * as plansService from "./plans.service";
 import { PlanSwitchError } from "./plans.service";
+import { sendPlanChangeEmail } from "../notifications/account-emails";
 
 export async function listPlans(request: FastifyRequest, reply: FastifyReply) {
   const account = await requireSession(request, reply);
@@ -32,7 +33,9 @@ export async function switchPlan(
     if (!planKey) {
       return fail(reply, AppStatus.PLAN_SWITCH_VALIDATION_FAILED, "planKey is required", 400);
     }
+    const previous = await plansService.getActivePlan(account.id);
     const membership = await plansService.switchToSelfServePlan(account.id, planKey);
+    sendPlanChangeEmail({ accountId: account.id, fromKey: previous?.key ?? null, toKey: membership.key });
     return ok(reply, AppStatus.PLAN_SWITCH_OK, plansService.mapAuthPlan(membership));
   } catch (error: unknown) {
     if (error instanceof PlanSwitchError) {

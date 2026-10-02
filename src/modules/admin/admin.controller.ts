@@ -3,7 +3,6 @@ import { AppStatus } from "../../config/app-status-codes";
 import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
 import * as adminService from "./admin.service";
-import type { Client } from "./admin.service";
 import * as usersService from "./users.service";
 import type {
   AccountStatus,
@@ -415,45 +414,6 @@ export async function listLedger(
     logCaught("admin.controller.listLedger", error);
     request.log.error({ err: error }, "[admin.controller.listLedger] failed");
     return fail(reply, AppStatus.ADMIN_LEDGER_FETCH_FAILED, "Failed to list ledger", 500);
-  }
-}
-
-export async function listClients(request: FastifyRequest, reply: FastifyReply) {
-  try {
-    const clients = await adminService.listClientsWithBalances();
-    return ok(reply, AppStatus.ADMIN_CLIENTS_RETRIEVED, clients);
-  } catch (error: unknown) {
-    logCaught("admin.controller.listClients", error);
-    request.log.error({ err: error }, "[admin.controller.listClients] failed");
-    return fail(reply, AppStatus.ADMIN_CLIENTS_FETCH_FAILED, "Failed to list clients", 500);
-  }
-}
-
-export async function createClient(
-  request: FastifyRequest<{ Body: { name?: string; email?: string; plan?: string } }>,
-  reply: FastifyReply
-) {
-  try {
-    const name = request.body?.name?.trim();
-    const email = request.body?.email?.trim();
-    if (!name || !email) {
-      return fail(
-        reply,
-        AppStatus.ADMIN_CLIENT_VALIDATION_FAILED,
-        "name and email are required",
-        400
-      );
-    }
-    const requestedPlan = request.body?.plan;
-    const plan: Client["plan"] = (adminService.PLANS as readonly string[]).includes(requestedPlan ?? "")
-      ? (requestedPlan as Client["plan"])
-      : "pay_as_you_go";
-    const client = await adminService.createClient({ name, email, plan });
-    return ok(reply, AppStatus.ADMIN_CLIENT_CREATED, client, 201);
-  } catch (error: unknown) {
-    logCaught("admin.controller.createClient", error);
-    request.log.error({ err: error }, "[admin.controller.createClient] failed");
-    return fail(reply, AppStatus.ADMIN_CLIENT_CREATE_FAILED, "Failed to create client", 500);
   }
 }
 

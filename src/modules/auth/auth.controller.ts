@@ -13,7 +13,8 @@ import { logCaught } from "../../shared/utils/log";
 import * as authService from "./auth.service";
 import type { AccountRow, SessionAccount } from "./types";
 import * as plansService from "../plans/plans.service";
-import { getOrgPolicyForAccount } from "../orgs/orgs.service";
+import { getOrgPolicyForAccount, listPendingInvitesForEmail } from "../orgs/orgs.service";
+import { sendWelcomeEmail } from "../notifications/account-emails";
 import type { GoogleOAuthConfig } from "./google.oauth";
 import {
   buildGoogleAuthorizeUrl,
@@ -97,7 +98,7 @@ export async function googleCallback(
       return;
     }
 
-    const account: AccountRow = await authService.upsertGoogleAccount({
+    const account = await authService.upsertGoogleAccount({
       googleId: profile.sub,
       email: profile.email,
       emailVerified: Boolean(profile.email_verified),
@@ -109,6 +110,7 @@ export async function googleCallback(
       await reply.redirect(loginRedirect(config.webOrigin, { error: "suspended" }));
       return;
     }
+    if (account.isNew) sendWelcomeEmail({ email: account.email, name: account.name });
 
     const rawToken: string = newSessionToken();
     const ipAddress: string | null = clientIp(request);
@@ -172,6 +174,14 @@ async function mapMe(account: {
     authService.getPersonalizationSettings(account.id),
     getOrgPolicyForAccount(account.id),
   ]);
+  // Drives which Organization view the client shows (and whether it shows one).
+  const orgStatus: "none" | "invited" | "setting_up" | "active" = orgPolicy
+    ? orgPolicy.planKey
+      ? "active"
+      : "setting_up"
+    : (await listPendingInvitesForEmail(account.email)).length > 0
+      ? "invited"
+      : "none";
   return {
     id: account.id,
     email: account.email,
@@ -191,6 +201,7 @@ async function mapMe(account: {
           planKey: orgPolicy.planKey,
         }
       : null,
+    orgStatus,
     impersonatedBy: account.impersonated_by
       ? { adminId: account.impersonated_by, adminLabel: account.impersonator_label ?? "an admin" }
       : null,

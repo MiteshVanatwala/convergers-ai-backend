@@ -7,6 +7,7 @@ import { logCaught } from "../../shared/utils/log";
 import * as plansService from "../plans/plans.service";
 import { getRazorpayClient, requireRazorpayKeyId, requireRazorpayKeySecret } from "./razorpay-client";
 import { issueInvoice } from "./invoices.service";
+import { sendPlanChangeEmail, sendTeamPlanEmail } from "../notifications/account-emails";
 
 export type SubscriptionErrorKind = "validation" | "not_found";
 
@@ -327,8 +328,11 @@ export async function finalizeSubscriptionActivation(input: {
         `UPDATE organizations SET plan_id = $2, seats = $3, updated_at = now() WHERE id = $1`,
         [row.org_id, row.plan_id, row.quantity]
       );
+      sendTeamPlanEmail({ orgId: row.org_id, event: "activated", seats: row.quantity });
     } else if (row.account_id) {
+      const previous = await plansService.getActivePlan(row.account_id);
       await plansService.setActivePlan(row.account_id, "pro", "razorpay");
+      sendPlanChangeEmail({ accountId: row.account_id, fromKey: previous?.key ?? null, toKey: "pro" });
     }
     return { finalized: true };
   } catch (error: unknown) {
@@ -441,6 +445,22 @@ export async function grantSubscriptionCredits(input: {
 }
 
 /**
+ * Best-effort cancel of Razorpay subscriptions that were never paid (an
+ * abandoned Team checkout), so they can't be completed later. Failures are
+ * logged, not thrown — the subscription may already have expired on
+ * Razorpay's side, and our own rows are already gone.
+ */
+export async function cancelUnpaidRazorpaySubscriptions(razorpaySubscriptionIds: string[]): Promise<void> {
+  for (const id of razorpaySubscriptionIds) {
+    try {
+      await getRazorpayClient().subscriptions.cancel(id, false);
+    } catch (error: unknown) {
+      logCaught("billing.subscription.service.cancelUnpaidRazorpaySubscriptions", error);
+    }
+  }
+}
+
+/**
  * Fires on subscription.cancelled/completed/halted webhook events. Reverts
  * the account to Free even without a "Cancel" button in our own UI yet —
  * cancelling via Razorpay's own channels still needs to downgrade the
@@ -469,6 +489,7 @@ export async function handleSubscriptionCancelled(input: {
         `UPDATE organizations SET plan_id = NULL, seats = 0, updated_at = now() WHERE id = $1`,
         [row.org_id]
       );
+      sendTeamPlanEmail({ orgId: row.org_id, event: "ended" });
       return;
     }
     if (!row.account_id) return;
@@ -479,6 +500,7 @@ export async function handleSubscriptionCancelled(input: {
     const active = await plansService.getActivePlan(row.account_id);
     if (active?.key === "pro") {
       await plansService.setActivePlan(row.account_id, "free", "razorpay");
+      sendPlanChangeEmail({ accountId: row.account_id, fromKey: "pro", toKey: "free" });
     }
   } catch (error: unknown) {
     logCaught("billing.subscription.service.handleSubscriptionCancelled", error);

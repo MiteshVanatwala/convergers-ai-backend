@@ -11,7 +11,11 @@ export type OrgErrorKind =
   | "invite_not_found"
   | "invite_expired"
   | "invite_wrong_account"
-  | "no_seats";
+  | "no_seats"
+  | "org_not_found"
+  | "not_set_up"
+  | "has_plan"
+  | "has_history";
 
 export class OrgError extends Error {
   constructor(
@@ -565,7 +569,7 @@ export async function acceptInvite(input: {
         throw new OrgError("This invite has expired. Ask for a new one.", "invite_expired");
       }
 
-      // On a paid Team plan, joining needs a free seat. The invite already
+      // Joining needs a paid Team plan with a free seat. The invite already
       // reserved one, so compare members only (not members + invites).
       const seatCheck: QueryResult<{ seats: number; members: string }> = await client.query(
         `SELECT o.seats, (SELECT COUNT(*) FROM organization_members WHERE org_id = o.id)::text AS members
@@ -573,7 +577,13 @@ export async function acceptInvite(input: {
         [invite.org_id]
       );
       const seat = seatCheck.rows[0];
-      if (seat && seat.seats > 0 && Number(seat.members) >= seat.seats) {
+      if (seat && seat.seats === 0) {
+        throw new OrgError(
+          "This organization isn't on the Team plan yet, so it can't take members. Ask the owner to finish setting it up.",
+          "not_set_up"
+        );
+      }
+      if (seat && Number(seat.members) >= seat.seats) {
         throw new OrgError("All seats in this organization are taken. Ask an admin to add seats.", "no_seats");
       }
 
@@ -618,6 +628,67 @@ export async function updateMemberRole(orgId: string, accountId: string, role: O
     );
   } catch (error: unknown) {
     logCaught("orgs.service.updateMemberRole", error);
+    throw error;
+  }
+}
+
+/**
+ * Deletes an org that never finished Team setup (the owner's "Cancel setup").
+ * Refuses once it has a plan, credits, or any billing history — those records
+ * must outlive the org. Unpaid checkout leftovers (pending subscriptions,
+ * unpaid credit orders) are removed with it; the caller cancels the returned
+ * Razorpay subscription ids after commit.
+ */
+export async function deleteUnpaidOrg(orgId: string): Promise<{ pendingRazorpaySubscriptionIds: string[] }> {
+  try {
+    return await withPoolTransaction(async (client: PoolClient) => {
+      const locked: QueryResult<{ has_plan: boolean }> = await client.query(
+        `SELECT plan_id IS NOT NULL AS has_plan FROM organizations WHERE id = $1 FOR UPDATE`,
+        [orgId]
+      );
+      const org = locked.rows[0];
+      if (!org) throw new OrgError("Organization not found.", "org_not_found");
+      if (org.has_plan) {
+        throw new OrgError("This organization has an active Team plan, so it can't be deleted.", "has_plan");
+      }
+
+      const history: QueryResult<{ has_history: boolean }> = await client.query(
+        `SELECT
+           COALESCE((SELECT balance FROM org_credit_wallets WHERE org_id = $1), 0) > 0
+           OR EXISTS (SELECT 1 FROM credit_ledger WHERE org_id = $1)
+           OR EXISTS (SELECT 1 FROM invoices WHERE org_id = $1)
+           OR EXISTS (SELECT 1 FROM credit_purchases WHERE org_id = $1 AND status = 'succeeded')
+           OR EXISTS (SELECT 1 FROM subscriptions WHERE org_id = $1 AND status <> 'pending')
+           AS has_history`,
+        [orgId]
+      );
+      if (history.rows[0]?.has_history) {
+        throw new OrgError(
+          "This organization has credits or billing history, so it can't be deleted. Contact support to close it.",
+          "has_history"
+        );
+      }
+
+      const pending: QueryResult<{ razorpay_subscription_id: string }> = await client.query(
+        `DELETE FROM subscriptions WHERE org_id = $1 AND status = 'pending'
+         RETURNING razorpay_subscription_id`,
+        [orgId]
+      );
+      await client.query(`DELETE FROM credit_purchases WHERE org_id = $1 AND status <> 'succeeded'`, [orgId]);
+      await client.query(`UPDATE projects SET org_id = NULL WHERE org_id = $1`, [orgId]);
+      await client.query(`UPDATE payment_methods SET org_id = NULL WHERE org_id = $1`, [orgId]);
+      // Members, invites, the (empty) pool, billing profile and API keys cascade.
+      await client.query(`DELETE FROM organizations WHERE id = $1`, [orgId]);
+
+      return {
+        pendingRazorpaySubscriptionIds: pending.rows
+          .map((r) => r.razorpay_subscription_id)
+          .filter((id): id is string => Boolean(id)),
+      };
+    });
+  } catch (error: unknown) {
+    if (error instanceof OrgError) throw error;
+    logCaught("orgs.service.deleteUnpaidOrg", error);
     throw error;
   }
 }

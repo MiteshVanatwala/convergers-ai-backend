@@ -16,6 +16,7 @@ import * as providersController from "./admin-providers.controller";
 import * as plansController from "./admin-plans.controller";
 import * as featureCatalogController from "./admin-feature-catalog.controller";
 import * as impersonationController from "./admin-impersonation.controller";
+import * as salesController from "./admin-sales.controller";
 
 export function registerAdminRoutes(app: FastifyInstance): void {
   // Public probe — not enveloped, not auth-gated (AGENTS.md).
@@ -173,14 +174,14 @@ export function registerAdminRoutes(app: FastifyInstance): void {
       };
     }>("/admin/credits/ledger", (request, reply) => adminController.listLedger(request, reply));
 
-    adminApp.get("/admin/clients", (request, reply) => adminController.listClients(request, reply));
-
-    adminApp.post<{ Body: { name?: string; email?: string; plan?: string } }>(
-      "/admin/clients",
-      (request, reply) => adminController.createClient(request, reply)
-    );
-
     adminApp.get("/admin/stats", (request, reply) => adminController.stats(request, reply));
+
+    const requireViewDashboard = requirePermissionPreHandler(AdminPermission.DASHBOARD_VIEW_AGGREGATE);
+    adminApp.get<{ Querystring: { range?: string } }>(
+      "/admin/dashboard",
+      { preHandler: requireViewDashboard },
+      (request, reply) => setupController.getDashboard(request, reply)
+    );
 
     adminApp.get("/admin/setup", { preHandler: requireViewProviderHealth }, (request, reply) =>
       setupController.getSetup(request, reply)
@@ -305,6 +306,21 @@ export function registerAdminRoutes(app: FastifyInstance): void {
       "/admin/plan-features/:key",
       { preHandler: requireManagePlans },
       (request, reply) => featureCatalogController.updatePlanFeatureAccess(request, reply)
+    );
+
+    // "Contact sales" inbox — support / engineering admins (ticket.manage).
+    const requireTicketManage = requirePermissionPreHandler(AdminPermission.TICKET_MANAGE);
+
+    adminApp.get<{ Querystring: { status?: string; limit?: string; offset?: string } }>(
+      "/admin/sales-inquiries",
+      { preHandler: requireTicketManage },
+      (request, reply) => salesController.listInquiries(request, reply)
+    );
+
+    adminApp.patch<{ Params: { id: string }; Body: { status?: string } }>(
+      "/admin/sales-inquiries/:id",
+      { preHandler: requireTicketManage },
+      (request, reply) => salesController.updateInquiry(request, reply)
     );
   });
 }

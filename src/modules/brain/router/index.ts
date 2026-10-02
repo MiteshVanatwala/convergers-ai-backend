@@ -18,7 +18,8 @@ import { creditsForCost } from "../../ledger/ledger.service";
 import { getPool } from "../../../infrastructure/db/pool";
 import * as usageLog from "../usageLog";
 import * as usageService from "../../usage/usage.service";
-import { UserFacingError, describeProviderFailure, isCapacityError } from "./errors";
+import { UserFacingError, classifyModelFailure, describeProviderFailure, isCapacityError } from "./errors";
+import { recordModelFailure, recordModelSuccess } from "../modelHealth";
 import { BYOK_FEE_CREDITS, planAttempt } from "./credits";
 import { getOrgPolicyForAccount } from "../../orgs/orgs.service";
 
@@ -267,12 +268,20 @@ async function walkChain(
   let lastIndex = 0;
   for (let i = 0; i < chain.length; i++) {
     lastIndex = i;
+    // Set once the provider is actually called, for the admin model-status board.
+    let callStartedAt: number | null = null;
+    let byok = false;
     try {
       // Priced before it's announced, so an option skipped for credits never
       // shows up as "Sending to …" in the client's routing timeline.
       const plan = await planAttempt(chain[i], request, accountId, labelFor(chain[i].id));
       await onAttempt?.(chain[i], i);
+      byok = plan.byok;
+      callStartedAt = Date.now();
       const response = await attempt(chain[i], plan.request);
+      recordModelSuccess(chain[i].id, Date.now() - callStartedAt);
+      // A billing error after this point isn't the model's fault.
+      callStartedAt = null;
       const credits = plan.byok ? BYOK_FEE_CREDITS : creditsForCost(response.native_cost);
       const { charged, usageEventId } = await usageService.recordSuccessAndDebit({
         accountId,
@@ -307,6 +316,12 @@ async function walkChain(
     } catch (err) {
       if (i === 0) firstError = err;
       lastError = err;
+      // Only failures of the provider call itself, on our key — a user's own (BYOK)
+      // key being rejected says nothing about the model's health.
+      if (callStartedAt != null && !byok) {
+        const failure = classifyModelFailure(err);
+        if (failure) recordModelFailure(chain[i].id, Date.now() - callStartedAt, failure.kind, failure.status);
+      }
       // An explicit pick only falls back when it was rate/capacity limited.
       const stop = explicitPick && i === 0 && !isCapacityError(err);
       console.warn(

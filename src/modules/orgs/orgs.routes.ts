@@ -4,9 +4,8 @@ import * as orgsController from "./orgs.controller";
 export function registerOrgRoutes(app: FastifyInstance): void {
   app.get("/v1/org", (request, reply) => orgsController.getMyOrg(request, reply));
 
-  app.post<{ Body: { name?: string } }>("/v1/org", (request, reply) =>
-    orgsController.createOrg(request, reply)
-  );
+  // No POST /v1/org: orgs are created by Team checkout (POST /v1/org/subscription with orgName).
+  app.delete("/v1/org", (request, reply) => orgsController.deleteOrg(request, reply));
 
   app.patch<{ Body: { name?: string } }>("/v1/org", (request, reply) =>
     orgsController.renameOrg(request, reply)

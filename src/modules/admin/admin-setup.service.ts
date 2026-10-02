@@ -1,6 +1,8 @@
 import type { QueryResult } from "pg";
+import { getRazorpayClient } from "../billing/razorpay-client";
 import { billingConfigWarnings, loadEnv } from "../../config/env";
 import { getPool } from "../../infrastructure/db/pool";
+import { emailProviderLabel } from "../../infrastructure/email/send-email";
 import { logCaught } from "../../shared/utils/log";
 import { PROVIDERS, isConfigured } from "../brain/adapters/keyStore";
 import { isValidGstin } from "../billing/invoices.service";
@@ -88,16 +90,59 @@ const MIGRATION_PROBES: { file: string; purpose: string; sql: string }[] = [
     purpose: "Pay-as-you-go auto top-up (saved card)",
     sql: `SELECT to_regclass('public.auto_topup_settings') IS NOT NULL AS applied`,
   },
+  {
+    file: "plan_features_v2.sql",
+    purpose: "Pricing bullets for Team, and Pro's credit bullet",
+    sql: `SELECT EXISTS (SELECT 1 FROM feature_catalog WHERE key = 'shared_credit_pool') AS applied`,
+  },
+  {
+    file: "sales_inquiries_v1.sql",
+    purpose: "Contact sales form and the Sales inquiries inbox",
+    sql: `SELECT to_regclass('public.sales_inquiries') IS NOT NULL AS applied`,
+  },
+  {
+    file: "email_login_v1.sql",
+    purpose: "Sign in with an emailed one-time code",
+    sql: `SELECT to_regclass('public.email_login_codes') IS NOT NULL AS applied`,
+  },
 ];
 
 const PARTITIONED_TABLES = ["credit_ledger", "usage_events", "messages"];
 
-function paymentsGroup(): SetupGroup {
+/** Read-only call to confirm Razorpay accepts the keys (a regenerated key pair is rejected with 401). */
+async function verifyRazorpayKeys(): Promise<"ok" | "rejected" | "unreachable"> {
+  try {
+    await getRazorpayClient().orders.all({ count: 1 });
+    return "ok";
+  } catch (error: unknown) {
+    return (error as { statusCode?: unknown } | null)?.statusCode === 401 ? "rejected" : "unreachable";
+  }
+}
+
+async function paymentsGroup(): Promise<SetupGroup> {
   const env = loadEnv();
   const keyId = env.razorpayKeyId ?? "";
   const mode = keyId.startsWith("rzp_live_") ? "live" : keyId.startsWith("rzp_test_") ? "test" : null;
+  const keysSet = Boolean(env.razorpayKeyId && env.razorpayKeySecret);
+  const verified = keysSet ? await verifyRazorpayKeys() : null;
   const checks: SetupCheck[] = [
-    env.razorpayKeyId && env.razorpayKeySecret
+    keysSet && verified === "rejected"
+      ? {
+          id: "razorpay_keys",
+          label: "Razorpay keys",
+          status: "error",
+          detail: "Set, but Razorpay rejects them (Authentication failed) — every checkout fails.",
+          fix: "Generate a new key pair in Razorpay → Account & Settings → API Keys, put both in backend/.env and restart the backend.",
+        }
+      : keysSet && verified === "unreachable"
+        ? {
+            id: "razorpay_keys",
+            label: "Razorpay keys",
+            status: "warn",
+            detail: "Set, but Razorpay couldn't be reached to check them.",
+            fix: "Check the server's internet access, then Re-check.",
+          }
+      : keysSet
       ? {
           id: "razorpay_keys",
           label: "Razorpay keys",
@@ -337,8 +382,23 @@ function signInGroup(): SetupGroup {
           detail: "Off — fine on localhost, but session cookies can travel over plain HTTP.",
           fix: "Set COOKIE_SECURE=true in production (HTTPS).",
         },
+    emailProviderLabel()
+      ? {
+          id: "email",
+          label: "Email",
+          status: "ok",
+          detail: `Sending via ${emailProviderLabel()} from ${env.email.from}. Welcome and plan-change emails are on; Contact sales requests go to ${env.email.salesInbox}.`,
+        }
+      : {
+          id: "email",
+          label: "Email",
+          status: "warn",
+          detail:
+            "Not set — no welcome or plan-change emails are sent, and Contact sales requests are only saved to the Sales inquiries page.",
+          fix: "Set SMTP_HOST, SMTP_USER, SMTP_PASS and EMAIL_FROM (or RESEND_API_KEY and EMAIL_FROM) in backend/.env.",
+        },
   ];
-  return { id: "signin", title: "Sign-in & sessions", checks };
+  return { id: "signin", title: "Sign-in, sessions & email", checks };
 }
 
 async function countPendingInvoices(): Promise<number> {
@@ -366,7 +426,7 @@ export async function getSetupChecklist(): Promise<{ groups: SetupGroup[]; warni
     const { group: database, invoicesTableExists } = await databaseGroup();
     const pending = invoicesTableExists ? await countPendingInvoices() : null;
     const b2bWithoutSac = invoicesTableExists ? await countB2bInvoicesWithoutSac() : null;
-    const payments = paymentsGroup();
+    const payments = await paymentsGroup();
     payments.checks.push(...(await invoicingChecks(pending, b2bWithoutSac)));
     const groups = [payments, database, await providersGroup(), signInGroup()];
     return { groups, warnings: billingConfigWarnings() };
