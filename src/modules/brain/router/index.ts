@@ -5,12 +5,11 @@ import type { ProviderAdapter, ProviderResponse } from "../adapters/types";
 import { haikuAdapter, sonnetAdapter, opusAdapter } from "../adapters/anthropic";
 import { openaiImageAdapter } from "../adapters/openai";
 import { deepseekFlashAdapter, deepseekProAdapter } from "../adapters/deepseek";
-import { glmAdapter, glmAirAdapter } from "../adapters/glm";
-import { kimiAdapter } from "../adapters/kimi";
+import { glmAdapter, glmFlashAdapter } from "../adapters/glm";
+import { kimiAdapter, kimiCodeAdapter } from "../adapters/kimi";
 import { qwenAdapter } from "../adapters/qwen";
-import { gptOssAdapter } from "../adapters/gptOss";
-import { geminiFlashAdapter, geminiProAdapter } from "../adapters/gemini";
-import { mistralLargeAdapter, mistralSmallAdapter } from "../adapters/mistral";
+import { gptOssAdapter, gptOss20bAdapter } from "../adapters/gptOss";
+import { geminiFlashAdapter, geminiFlashLiteAdapter, geminiProAdapter } from "../adapters/gemini";
 import { xaiAdapter, grok43Adapter } from "../adapters/xai";
 import { openrouterAdapter } from "../adapters/openrouter";
 import { normalize } from "../normalizer";
@@ -20,6 +19,7 @@ import * as usageLog from "../usageLog";
 import * as usageService from "../../usage/usage.service";
 import { UserFacingError, classifyModelFailure, describeProviderFailure, isCapacityError } from "./errors";
 import { recordModelFailure, recordModelSuccess } from "../modelHealth";
+import { recordModelCallFailure } from "../callFailures";
 import { BYOK_FEE_CREDITS, planAttempt } from "./credits";
 import { getOrgPolicyForAccount } from "../../orgs/orgs.service";
 
@@ -37,14 +37,15 @@ const ADAPTER_LOOKUP: Record<string, ProviderAdapter> = {
   [deepseekFlashAdapter.id]: deepseekFlashAdapter,
   [deepseekProAdapter.id]: deepseekProAdapter,
   [glmAdapter.id]: glmAdapter,
-  [glmAirAdapter.id]: glmAirAdapter,
+  [glmFlashAdapter.id]: glmFlashAdapter,
   [kimiAdapter.id]: kimiAdapter,
+  [kimiCodeAdapter.id]: kimiCodeAdapter,
   [qwenAdapter.id]: qwenAdapter,
   [gptOssAdapter.id]: gptOssAdapter,
+  [gptOss20bAdapter.id]: gptOss20bAdapter,
   [geminiFlashAdapter.id]: geminiFlashAdapter,
+  [geminiFlashLiteAdapter.id]: geminiFlashLiteAdapter,
   [geminiProAdapter.id]: geminiProAdapter,
-  [mistralLargeAdapter.id]: mistralLargeAdapter,
-  [mistralSmallAdapter.id]: mistralSmallAdapter,
   [xaiAdapter.id]: xaiAdapter,
   [grok43Adapter.id]: grok43Adapter,
   [openrouterAdapter.id]: openrouterAdapter,
@@ -320,7 +321,17 @@ async function walkChain(
       // key being rejected says nothing about the model's health.
       if (callStartedAt != null && !byok) {
         const failure = classifyModelFailure(err);
-        if (failure) recordModelFailure(chain[i].id, Date.now() - callStartedAt, failure.kind, failure.status);
+        if (failure) {
+          recordModelFailure(chain[i].id, Date.now() - callStartedAt, failure.kind, failure.status);
+          recordModelCallFailure({
+            providerId: chain[i].id,
+            taskType,
+            accountId,
+            kind: failure.kind,
+            status: failure.status,
+            error: err,
+          });
+        }
       }
       // An explicit pick only falls back when it was rate/capacity limited.
       const stop = explicitPick && i === 0 && !isCapacityError(err);

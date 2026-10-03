@@ -6,7 +6,7 @@ import {
   type ProviderResponse,
 } from "./types";
 import type { RouteRequest } from "@convergers-ai/shared-types";
-import { nativeCost } from "./pricing";
+import { nativeCost, type TokenUsage } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
 
 // Some open-weight models default to an agentic/tool-calling persona and
@@ -27,6 +27,24 @@ function buildMessages(request: RouteRequest): OpenAI.Chat.ChatCompletionMessage
     ...(request.history ?? []).map((turn) => ({ role: turn.role, content: turn.content })),
     { role: "user" as const, content: request.input },
   ];
+}
+
+/**
+ * Providers cache repeated prompt prefixes automatically and bill those tokens
+ * at a discount, but report the cached count under different names: OpenAI,
+ * Groq and Gemini use `prompt_tokens_details.cached_tokens`, DeepSeek
+ * `prompt_cache_hit_tokens`, Moonshot (Kimi) a top-level `cached_tokens`.
+ */
+function toUsage(u: OpenAI.CompletionUsage | undefined | null): TokenUsage {
+  if (!u) return { input_tokens: 0, output_tokens: 0 };
+  const extra = u as OpenAI.CompletionUsage & { prompt_cache_hit_tokens?: number; cached_tokens?: number };
+  const cached = u.prompt_tokens_details?.cached_tokens ?? extra.prompt_cache_hit_tokens ?? extra.cached_tokens ?? 0;
+  const input = u.prompt_tokens ?? 0;
+  return {
+    input_tokens: input,
+    output_tokens: u.completion_tokens ?? 0,
+    cached_input_tokens: Math.min(Math.max(0, cached), input),
+  };
 }
 
 /**
@@ -55,6 +73,7 @@ export function createOpenAICompatibleAdapter(config: {
     keyProviderId: providerKeyId,
     cost: { kind: "tokens", model, maxOutputTokens: MAX_OUTPUT_TOKENS },
     async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
+      const startedAt = new Date();
       const client = await getClient(accountId);
       const response = await client.chat.completions.create({
         model,
@@ -63,15 +82,12 @@ export function createOpenAICompatibleAdapter(config: {
       });
 
       const content = response.choices[0]?.message?.content ?? "";
-      const usage = {
-        input_tokens: response.usage?.prompt_tokens ?? 0,
-        output_tokens: response.usage?.completion_tokens ?? 0,
-      };
+      const usage = toUsage(response.usage);
 
       return {
         content,
         usage,
-        native_cost: nativeCost(model, usage),
+        native_cost: nativeCost(model, usage, startedAt),
         truncated: response.choices[0]?.finish_reason === "length",
       };
     },
@@ -80,6 +96,7 @@ export function createOpenAICompatibleAdapter(config: {
       onDelta: (text: string) => void,
       accountId: string | null
     ): Promise<ProviderResponse> {
+      const startedAt = new Date();
       const client = await getClient(accountId);
       const stream = await client.chat.completions.create({
         model,
@@ -90,7 +107,7 @@ export function createOpenAICompatibleAdapter(config: {
       });
 
       let content = "";
-      let usage = { input_tokens: 0, output_tokens: 0 };
+      let usage: TokenUsage = { input_tokens: 0, output_tokens: 0 };
       let truncated = false;
 
       for await (const chunk of stream) {
@@ -100,15 +117,10 @@ export function createOpenAICompatibleAdapter(config: {
           content += delta;
           onDelta(delta);
         }
-        if (chunk.usage) {
-          usage = {
-            input_tokens: chunk.usage.prompt_tokens ?? 0,
-            output_tokens: chunk.usage.completion_tokens ?? 0,
-          };
-        }
+        if (chunk.usage) usage = toUsage(chunk.usage);
       }
 
-      return { content, usage, native_cost: nativeCost(model, usage), truncated };
+      return { content, usage, native_cost: nativeCost(model, usage, startedAt), truncated };
     },
   };
 }

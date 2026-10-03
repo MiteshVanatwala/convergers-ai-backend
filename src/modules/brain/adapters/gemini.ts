@@ -17,3 +17,12 @@ export const geminiProAdapter = createOpenAICompatibleAdapter({
   providerKeyId: "gemini",
   providerLabel: "Google Gemini",
 });
+
+// Budget tier — cheapest current Gemini text model.
+export const geminiFlashLiteAdapter = createOpenAICompatibleAdapter({
+  id: "gemini:gemini-3.5-flash-lite",
+  model: "gemini-3.5-flash-lite",
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+  providerKeyId: "gemini",
+  providerLabel: "Google Gemini",
+});

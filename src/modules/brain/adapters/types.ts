@@ -1,4 +1,5 @@
 import type { RouteRequest } from "@convergers-ai/shared-types";
+import type { TokenUsage } from "./pricing";
 
 /**
  * What adapters actually receive: the public RouteRequest plus Brain-internal
@@ -28,7 +29,7 @@ export type AdapterCost =
 
 export interface ProviderResponse {
   content: string;
-  usage: { input_tokens: number; output_tokens: number };
+  usage: TokenUsage;
   native_cost: number;
   /** Stopped at the output-token limit (Anthropic "max_tokens", OpenAI-style "length"). */
   truncated?: boolean;

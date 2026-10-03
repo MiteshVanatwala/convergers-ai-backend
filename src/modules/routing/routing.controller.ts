@@ -33,15 +33,19 @@ export async function models(request: FastifyRequest, reply: FastifyReply) {
        WHERE visible_to_users = true AND status = 'active'
        ORDER BY label`
     );
+    const ownKeysResult = await pool.query<{ provider_id: string }>(
+      `SELECT DISTINCT provider_id FROM provider_api_keys WHERE account_id = $1 AND is_active = true`,
+      [account.id]
+    );
+    const ownKeyProviderIds = new Set(ownKeysResult.rows.map((r) => r.provider_id));
+    // Only models something can actually call: our key for the provider, or the user's own.
     const rows = result.rows.filter(
-      (row) => row.key_provider_id != null && isConfigured(row.key_provider_id)
+      (row) =>
+        row.key_provider_id != null &&
+        (isConfigured(row.key_provider_id) || ownKeyProviderIds.has(row.key_provider_id))
     );
 
-    const [ownKeysResult, plan, tierResult, catalogPlans, orgPolicy] = await Promise.all([
-      pool.query<{ provider_id: string }>(
-        `SELECT DISTINCT provider_id FROM provider_api_keys WHERE account_id = $1 AND is_active = true`,
-        [account.id]
-      ),
+    const [plan, tierResult, catalogPlans, orgPolicy] = await Promise.all([
       getOrEnsureActivePlan(account.id),
       rows.length > 0
         ? pool.query<{ provider_id: string; plan_key: string }>(
@@ -54,7 +58,6 @@ export async function models(request: FastifyRequest, reply: FastifyReply) {
     ]);
     const orgAllowed = orgPolicy?.allowedModelIds ? new Set(orgPolicy.allowedModelIds) : null;
 
-    const ownKeyProviderIds = new Set(ownKeysResult.rows.map((r) => r.provider_id));
     const allowedPlanKeysByModel = new Map<string, Set<string>>();
     for (const row of tierResult.rows) {
       const set = allowedPlanKeysByModel.get(row.provider_id) ?? new Set<string>();

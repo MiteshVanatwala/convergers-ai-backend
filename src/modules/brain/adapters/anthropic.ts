@@ -6,7 +6,7 @@ import {
   type ProviderResponse,
 } from "./types";
 import type { RouteRequest } from "@convergers-ai/shared-types";
-import { nativeCost } from "./pricing";
+import { nativeCost, type TokenUsage } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
 
 // Constructed fresh per call, not cached — cheap (no network I/O), and it
@@ -37,11 +37,37 @@ const SYSTEM_PROMPT =
 // non-streaming `call` path (it rejects requests expected to exceed 10 min).
 const MAX_OUTPUT_TOKENS = 16000;
 
+/**
+ * Prompt caching: once a conversation has history, the newest message is
+ * marked as a cache breakpoint, so the next turn re-reads everything before
+ * it at 10% of the input price (a write costs 1.25× once). Single-shot
+ * questions aren't marked — there's no next turn to benefit — and Anthropic
+ * ignores the marker on prompts under its ~1K-token minimum.
+ */
 function buildMessages(request: RouteRequest): Anthropic.MessageParam[] {
+  const history = request.history ?? [];
+  const cacheable = history.length >= 2;
   return [
-    ...(request.history ?? []).map((turn) => ({ role: turn.role, content: turn.content })),
-    { role: "user" as const, content: request.input },
+    ...history.map((turn) => ({ role: turn.role, content: turn.content })),
+    {
+      role: "user" as const,
+      content: cacheable
+        ? [{ type: "text" as const, text: request.input, cache_control: { type: "ephemeral" as const } }]
+        : request.input,
+    },
   ];
+}
+
+/** Total prompt size plus its cached / cache-written parts (Anthropic reports them separately). */
+function toUsage(u: Anthropic.Usage): TokenUsage {
+  const cached = u.cache_read_input_tokens ?? 0;
+  const written = u.cache_creation_input_tokens ?? 0;
+  return {
+    input_tokens: u.input_tokens + cached + written,
+    output_tokens: u.output_tokens,
+    cached_input_tokens: cached,
+    cache_write_tokens: written,
+  };
 }
 
 export function createAnthropicAdapter(id: string, model: string): ProviderAdapter {
@@ -50,6 +76,7 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
     keyProviderId: "anthropic",
     cost: { kind: "tokens", model, maxOutputTokens: MAX_OUTPUT_TOKENS },
     async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
+      const startedAt = new Date();
       const client = await getClient(id, accountId);
       const response = await client.messages.create({
         model,
@@ -63,15 +90,12 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
         .map((block) => block.text)
         .join("");
 
-      const usage = {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-      };
+      const usage = toUsage(response.usage);
 
       return {
         content,
         usage,
-        native_cost: nativeCost(model, usage),
+        native_cost: nativeCost(model, usage, startedAt),
         truncated: response.stop_reason === "max_tokens",
       };
     },
@@ -81,6 +105,7 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
       accountId: string | null,
       onInputTokens?: (tokens: number) => void
     ): Promise<ProviderResponse> {
+      const startedAt = new Date();
       const client = await getClient(id, accountId);
       const stream = client.messages.stream({
         model,
@@ -95,7 +120,7 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
       if (onInputTokens) {
         stream.on("streamEvent", (event) => {
           if (event.type === "message_start") {
-            onInputTokens(event.message.usage.input_tokens);
+            onInputTokens(toUsage(event.message.usage).input_tokens);
           }
         });
       }
@@ -106,15 +131,12 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
         .map((block) => block.text)
         .join("");
 
-      const usage = {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-      };
+      const usage = toUsage(response.usage);
 
       return {
         content,
         usage,
-        native_cost: nativeCost(model, usage),
+        native_cost: nativeCost(model, usage, startedAt),
         truncated: response.stop_reason === "max_tokens",
       };
     },
@@ -124,6 +146,8 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
 // Cheap/fast tier — default for plain text.
 export const haikuAdapter = createAnthropicAdapter("anthropic:claude-haiku-4-5", "claude-haiku-4-5");
 // Stronger tier — code and research, and the fallback for text if Haiku fails.
-export const sonnetAdapter = createAnthropicAdapter("anthropic:claude-sonnet-5", "claude-sonnet-5");
-// Top tier — frontier-class agentic coding and reasoning.
-export const opusAdapter = createAnthropicAdapter("anthropic:claude-opus-5", "claude-opus-5");
+// Sonnet 5.5 replaced Sonnet 5 (same price) — db/models_2026_10.sql.
+export const sonnetAdapter = createAnthropicAdapter("anthropic:claude-sonnet-5-5", "claude-sonnet-5-5");
+// Top tier — frontier-class agentic coding and reasoning. Opus 5.5 replaced
+// Opus 5 and is cheaper ($4/$20 vs $5/$25 per MTok).
+export const opusAdapter = createAnthropicAdapter("anthropic:claude-opus-5-5", "claude-opus-5-5");

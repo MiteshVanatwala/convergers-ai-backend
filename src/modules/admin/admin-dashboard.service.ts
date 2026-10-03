@@ -87,6 +87,10 @@ export type ModelStatus = {
   served24h: number;
   failed24h: number;
   lastServedAt: string | null;
+  /** From model_call_failures: failed API calls (incl. ones that fell back), last 7 days. */
+  failures7d: number;
+  /** Newest failure's status + provider message, e.g. "404 model not found". */
+  lastFailureMessage: string | null;
 };
 
 const n = (v: unknown): number => Number(v ?? 0) || 0;
@@ -282,6 +286,21 @@ export async function getDashboardSnapshot(range: DashboardRange): Promise<Dashb
 
     const rate = (ok: number, total: number) => (total > 0 ? ok / total : null);
 
+    // Separate and failure-tolerant: model_call_failures arrives with
+    // routing_costs_2026_10.sql, and the dashboard must work before it's applied.
+    const failureRows = await pool
+      .query<{ provider_id: string; n: string; last_message: string | null }>(
+        `SELECT provider_id, count(*)::text AS n,
+                (array_agg(trim(coalesce(http_status::text || ' ', '') || coalesce(message, ''))
+                           ORDER BY created_at DESC))[1] AS last_message
+         FROM model_call_failures
+         WHERE created_at >= now() - interval '7 days'
+         GROUP BY provider_id`
+      )
+      .then((res) => res.rows)
+      .catch(() => [] as { provider_id: string; n: string; last_message: string | null }[]);
+    const failuresByModel = new Map(failureRows.map((f) => [f.provider_id, f]));
+
     const modelStatuses: ModelStatus[] = models.rows.map((r) => {
       const { lastAttemptFailed, ...live } = getModelHealth(r.id);
       const derived = deriveModelStatus({
@@ -300,6 +319,8 @@ export async function getDashboardSnapshot(range: DashboardRange): Promise<Dashb
         served24h: n(r.served),
         failed24h: n(r.failed),
         lastServedAt: r.last_at ? new Date(r.last_at).toISOString() : null,
+        failures7d: n(failuresByModel.get(r.id)?.n),
+        lastFailureMessage: failuresByModel.get(r.id)?.last_message || null,
       };
     });
 

@@ -97,6 +97,15 @@ const MIGRATIONS: Migration[] = [
   { file: "plan_features_v2.sql", detect: `SELECT EXISTS (SELECT 1 FROM feature_catalog WHERE key = 'shared_credit_pool') AS applied` },
   { file: "sales_inquiries_v1.sql", detect: table("sales_inquiries") },
   { file: "email_login_v1.sql", detect: table("email_login_codes") },
+  {
+    file: "models_2026_10.sql",
+    detect: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'anthropic:claude-opus-5-5') AS applied`,
+  },
+  { file: "routing_costs_2026_10.sql", detect: table("model_call_failures") },
+  {
+    file: "remove_mistral.sql",
+    detect: `SELECT NOT EXISTS (SELECT 1 FROM provider_credentials WHERE id = 'mistral') AS applied`,
+  },
 ];
 
 const DB_DIR = join(__dirname, "..", "db");
