@@ -7,7 +7,6 @@ import {
   clearSessionCookie,
   newOAuthState,
   newSessionToken,
-  readSessionToken,
 } from "../../shared/utils/session-token";
 import { logCaught } from "../../shared/utils/log";
 import * as authService from "./auth.service";
@@ -226,10 +225,18 @@ async function mapMe(account: {
     authProvider: account.auth_provider,
     createdAt: account.created_at.toISOString(),
     plan: plansService.mapAuthPlan(membership),
-    creditsBalance, // from IDE
+    creditsBalance,
     defaultModelId: personalization.defaultModelId,
     filterSensitiveData: personalization.filterSensitiveData,
-    org: orgPolicy ? { /* HEAD fields */ } : null,
+    org: orgPolicy
+      ? {
+          id: orgPolicy.orgId,
+          name: orgPolicy.orgName,
+          role: orgPolicy.role,
+          enforceSensitiveFilter: orgPolicy.enforceSensitiveFilter,
+          planKey: orgPolicy.planKey,
+        }
+      : null,
     orgStatus,
     impersonatedBy: account.impersonated_by
       ? { adminId: account.impersonated_by, adminLabel: account.impersonator_label ?? "an admin" }
@@ -244,7 +251,8 @@ export async function updateMe(
   reply: FastifyReply
 ) {
   try {
-    const token: string | null = readSessionToken(request.headers.cookie);
+    // Bearer (IDE) or cookie (web) — same as GET /auth/me.
+    const token: string | null = extractSessionToken(request);
     if (!token) {
       return fail(reply, AppStatus.AUTH_UNAUTHORIZED, "Unauthorized", 401);
     }
@@ -359,7 +367,8 @@ export async function updateMe(
 
 export async function logout(request: FastifyRequest, reply: FastifyReply) {
   try {
-    const token: string | null = readSessionToken(request.headers.cookie);
+    // Bearer (IDE) or cookie (web).
+    const token: string | null = extractSessionToken(request);
     if (token) {
       await authService.revokeSession(token);
     }

@@ -262,12 +262,15 @@ export async function chatStream(
     // out-of-credits request leaves nothing behind. (handleStreamRequest
     // re-checks for the other entry points.)
     await assertHasCredits(account.id);
-    // IDE requests are local-only — skip conversation row creation and message persistence
+    // IDE requests are local-only — skip conversation row creation and message persistence.
+    // Still forward providerId / history so multi-turn + model picker match web quality.
     if (clientType === "ide") {
       const routeBody = {
         input,
         ...(body.modality_hint ? { modality_hint: body.modality_hint } : {}),
         ...(body.policy ? { policy: body.policy } : {}),
+        ...(body.providerId ? { providerId: body.providerId } : {}),
+        ...(Array.isArray(body.history) && body.history.length > 0 ? { history: body.history } : {}),
       };
       const result: RouteResponse = await handleStreamRequest(
         routeBody,
