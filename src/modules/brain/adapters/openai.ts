@@ -1,16 +1,11 @@
 import OpenAI from "openai";
 import type { ProviderAdapter, ProviderResponse } from "./types";
 import type { RouteRequest } from "@convergers-ai/shared-types";
-import { getKey } from "./keyStore";
+import { resolveKeyForAccount } from "./accountKeyResolver";
 
 // Constructed fresh per call, not cached — see anthropic.ts for why.
-function getClient(): OpenAI {
-  const apiKey = getKey("openai");
-  if (!apiKey) {
-    throw new Error(
-      "OpenAI isn't configured — add a key on the admin panel's API Keys page, or set OPENAI_API_KEY in backend/.env"
-    );
-  }
+async function getClient(accountId: string | null): Promise<OpenAI> {
+  const apiKey = await resolveKeyForAccount("openai:gpt-image-1", "openai", "OpenAI", accountId);
   return new OpenAI({ apiKey });
 }
 
@@ -31,8 +26,11 @@ const IMAGE_FLAT_COST_USD = 0.04;
  */
 export const openaiImageAdapter: ProviderAdapter = {
   id: "openai:gpt-image-1",
-  async call(request: RouteRequest): Promise<ProviderResponse> {
-    const response = await getClient().images.generate({
+  keyProviderId: "openai",
+  cost: { kind: "flat", usd: IMAGE_FLAT_COST_USD },
+  async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
+    const client = await getClient(accountId);
+    const response = await client.images.generate({
       model: "gpt-image-1",
       prompt: request.input,
       size: "1024x1024",
@@ -57,8 +55,12 @@ export const openaiImageAdapter: ProviderAdapter = {
       native_cost: IMAGE_FLAT_COST_USD,
     };
   },
-  async streamCall(request: RouteRequest, onDelta: (text: string) => void): Promise<ProviderResponse> {
-    const result = await openaiImageAdapter.call(request);
+  async streamCall(
+    request: RouteRequest,
+    onDelta: (text: string) => void,
+    accountId: string | null
+  ): Promise<ProviderResponse> {
+    const result = await openaiImageAdapter.call(request, accountId);
     onDelta(result.content);
     return result;
   },

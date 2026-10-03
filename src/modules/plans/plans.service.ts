@@ -1,6 +1,22 @@
 import type { PoolClient, QueryResult } from "pg";
 import { getPool } from "../../infrastructure/db/pool";
+import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
 import { logCaught } from "../../shared/utils/log";
+import { getHighlightsByPlan } from "./plan-features.service";
+
+export type PlanSwitchErrorKind = "validation";
+
+export class PlanSwitchError extends Error {
+  constructor(
+    message: string,
+    readonly kind: PlanSwitchErrorKind
+  ) {
+    super(message);
+    this.name = "PlanSwitchError";
+  }
+}
+
+const SELF_SERVE_SWITCH_KEYS = ["free", "pay_as_you_go"] as const;
 
 export const PLAN_KEY_ORDER = ["free", "pro", "pay_as_you_go", "enterprise"] as const;
 export type PlanKey = (typeof PLAN_KEY_ORDER)[number];
@@ -10,6 +26,8 @@ export type PlanCatalogRow = {
   key: string;
   display_name: string;
   price_usd_cents: number | null;
+  /** Charged price (Razorpay is INR); preferred over price_usd_cents for display. */
+  price_inr_paise: number | null;
   included_credits: number | null;
   rate_limit_rpm: number | null;
   features: Record<string, unknown>;
@@ -43,7 +61,7 @@ type MembershipJoinRow = {
   ends_at: Date | null;
 };
 
-function asFeatures(raw: Record<string, unknown> | string | null | undefined): Record<string, unknown> {
+export function asFeatures(raw: Record<string, unknown> | string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
   if (typeof raw === "string") {
     try {
@@ -161,37 +179,118 @@ export async function getOrEnsureActivePlan(
   return ensureFreePlanMembership(accountId, client, "migration");
 }
 
+/**
+ * Deactivates the account's current active plan row and activates a
+ * different one — the one place any plan change actually happens, whether
+ * that's a free self-serve switch or a paid Razorpay subscription
+ * activating. Runs in its own transaction unless an existing one is passed
+ * in (billing's subscription flow reuses this after its own webhook/verify
+ * transaction has already committed the subscription row, rather than
+ * nesting transactions across modules).
+ */
+export async function setActivePlan(
+  accountId: string,
+  planKey: string,
+  source: string,
+  client?: PoolClient
+): Promise<ActivePlanMembership> {
+  const run = async (db: PoolClient): Promise<ActivePlanMembership> => {
+    const target: QueryResult<{ id: string | number }> = await db.query(
+      `SELECT id FROM plans WHERE key = $1 LIMIT 1`,
+      [planKey]
+    );
+    const targetId = target.rows[0]?.id;
+    if (targetId == null) {
+      throw new Error(`Unknown plan "${planKey}"`);
+    }
+
+    await db.query(
+      `UPDATE account_plans SET status = 'canceled', canceled_at = now(), updated_at = now()
+       WHERE account_id = $1 AND status = 'active'`,
+      [accountId]
+    );
+    await db.query(
+      `INSERT INTO account_plans (account_id, plan_id, status, source) VALUES ($1, $2, 'active', $3)`,
+      [accountId, targetId, source]
+    );
+
+    const after = await getActivePlan(accountId, db);
+    if (!after) throw new Error("account_plans_switch_failed");
+    return after;
+  };
+
+  try {
+    if (client) return await run(client);
+    return await withPoolTransaction(run);
+  } catch (error: unknown) {
+    logCaught("plans.service.setActivePlan", error);
+    throw error;
+  }
+}
+
+/**
+ * Self-service only: Free and Pay-as-you-go are both $0 upfront, so
+ * "switching" is just changing the active plan row — no payment involved.
+ * Pro requires real checkout (billing/subscription.service.ts); Enterprise
+ * requires contacting sales. Both are rejected here rather than silently
+ * granted.
+ */
+export async function switchToSelfServePlan(
+  accountId: string,
+  planKey: string
+): Promise<ActivePlanMembership> {
+  if (!(SELF_SERVE_SWITCH_KEYS as readonly string[]).includes(planKey)) {
+    throw new PlanSwitchError(
+      `"${planKey}" can't be switched to directly — Pro requires checkout, Enterprise requires contacting sales`,
+      "validation"
+    );
+  }
+  return setActivePlan(accountId, planKey, "self_serve");
+}
+
 export async function listCatalogPlans(): Promise<PlanCatalogRow[]> {
   try {
     const pool = getPool();
-    const result: QueryResult<{
-      id: string | number;
-      key: string;
-      display_name: string;
-      price_usd_cents: number | null;
-      included_credits: number | null;
-      rate_limit_rpm: number | null;
-      features: Record<string, unknown> | string;
-    }> = await pool.query(
-      `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features
-       FROM plans
-       ORDER BY CASE key
-         WHEN 'free' THEN 1
-         WHEN 'pro' THEN 2
-         WHEN 'pay_as_you_go' THEN 3
-         WHEN 'enterprise' THEN 4
-         ELSE 99
-       END,
-       id ASC`
-    );
+    const [result, highlightsByPlan]: [
+      QueryResult<{
+        id: string | number;
+        key: string;
+        display_name: string;
+        price_usd_cents: number | null;
+        price_inr_paise: number | null;
+        included_credits: number | null;
+        rate_limit_rpm: number | null;
+        features: Record<string, unknown> | string;
+      }>,
+      Map<string, string[]>,
+    ] = await Promise.all([
+      pool.query(
+        `SELECT id, key, display_name, price_usd_cents, price_inr_paise, included_credits, rate_limit_rpm, features
+         FROM plans
+         ORDER BY CASE key
+           WHEN 'free' THEN 1
+           WHEN 'pro' THEN 2
+           WHEN 'pay_as_you_go' THEN 3
+           WHEN 'enterprise' THEN 4
+           ELSE 99
+         END,
+         id ASC`
+      ),
+      getHighlightsByPlan(),
+    ]);
     return result.rows.map((row) => ({
       id: Number(row.id),
       key: row.key,
       display_name: row.display_name,
       price_usd_cents: row.price_usd_cents,
+      price_inr_paise: row.price_inr_paise,
       included_credits: row.included_credits,
       rate_limit_rpm: row.rate_limit_rpm,
-      features: asFeatures(row.features),
+      // Highlights are computed from the feature catalog (plan_features x
+      // feature_catalog — see plan-features.service.ts), not stored on this
+      // row — the plans.features jsonb column no longer carries a
+      // `highlights` key (dropped by plan_features_v1.sql's migration).
+      features: { ...asFeatures(row.features), highlights: highlightsByPlan.get(row.key) ?? [] },
     }));
   } catch (error: unknown) {
     logCaught("plans.service.listCatalogPlans", error);
@@ -204,6 +303,7 @@ export function mapCatalogPlan(row: PlanCatalogRow) {
     key: row.key,
     displayName: row.display_name,
     priceUsdCents: row.price_usd_cents,
+    priceInrPaise: row.price_inr_paise,
     includedCredits: row.included_credits,
     rateLimitRpm: row.rate_limit_rpm,
     features: row.features,

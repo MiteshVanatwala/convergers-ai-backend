@@ -5,7 +5,12 @@ import { loadEnv } from "../../config/env";
 import { requireSession } from "../../infrastructure/http/middleware/require-session";
 import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
-import { handleStreamRequest } from "../brain";
+import {
+  assertHasCredits,
+  handleStreamRequest,
+  isSensitiveFilterEnabled,
+  userFacingPayload,
+} from "../brain";
 import * as usageService from "../usage/usage.service";
 import * as conversationsService from "./conversations.service";
 import { generateConversationTitle } from "./title.service";
@@ -270,6 +275,10 @@ export async function chatStream(
       send("done", { ...result });
       return;
     }
+    // Check before creating the conversation / storing the prompt, so an
+    // out-of-credits request leaves nothing behind. (handleStreamRequest
+    // re-checks for the other entry points.)
+    await assertHasCredits(account.id);
 
     let conversation = requestedId
       ? await conversationsService.getConversationForAccount(account.id, requestedId)
@@ -292,6 +301,16 @@ export async function chatStream(
 
     send("conversation", { id: conversation.id });
 
+    // Fetch prior turns BEFORE inserting the current message — otherwise
+    // it would show up as a duplicate trailing "history" entry alongside
+    // being passed separately as `input`.
+    const priorMessages = created
+      ? []
+      : await conversationsService.listMessages(account.id, conversation.id, 20);
+    const history = priorMessages
+      .filter((m) => m.status === "complete" && (m.role === "user" || m.role === "assistant"))
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+
     await conversationsService.insertMessage({
       conversationId: conversation.id,
       accountId: account.id,
@@ -304,6 +323,8 @@ export async function chatStream(
       input,
       ...(body.modality_hint ? { modality_hint: body.modality_hint } : {}),
       ...(body.policy ? { policy: body.policy } : {}),
+      ...(body.providerId ? { providerId: body.providerId } : {}),
+      ...(history.length > 0 ? { history } : {}),
     };
 
     const result: RouteResponse = await handleStreamRequest(
@@ -341,7 +362,12 @@ export async function chatStream(
       }
     }
 
-    if (conversation.title_status === "pending" || created) {
+    // The title model sees the raw prompt, so skip it when the account filters
+    // sensitive data — the conversation keeps its local provisional title.
+    if (
+      (conversation.title_status === "pending" || created) &&
+      !(await isSensitiveFilterEnabled(account.id))
+    ) {
       const title = await generateConversationTitle(input);
       if (title) {
         const updated = await conversationsService.setGeneratedTitle(
@@ -358,7 +384,7 @@ export async function chatStream(
     send("done", { ...result, conversationId: conversation.id });
   } catch (err) {
     request.log.error(err);
-    send("error", { message: err instanceof Error ? err.message : String(err) });
+    send("error", userFacingPayload(err));
   } finally {
     res.end();
   }

@@ -2,8 +2,15 @@ import type { PoolClient, QueryResult } from "pg";
 import { LedgerReason, LedgerReferenceType } from "../../config/ledger-reasons";
 import { getPool } from "../../infrastructure/db/pool";
 import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
-import { debit, ensureWallet } from "../ledger/ledger.service";
+import { applyDueRecurringGrant, debit, ensureWallet } from "../ledger/ledger.service";
+import {
+  getMemberSpentThisMonth,
+  getSpendContext,
+  remainingUnderLimit,
+  type SpendContext,
+} from "../ledger/spend.service";
 import { logCaught } from "../../shared/utils/log";
+import { maybeAutoTopUp } from "../billing/auto-topup.service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -13,6 +20,11 @@ export type UsageOutcome = "success" | "error";
 
 export type InsertUsageEventInput = {
   accountId: string;
+  /** Set when the request was charged to an organization pool. */
+  orgId?: string | null;
+  /** Distinct values the sensitive-data filter masked, and their kinds (never the values). */
+  redactedCount?: number;
+  redactedTypes?: string[] | null;
   conversationId?: string | null;
   messageId?: string | null;
   taskType: string;
@@ -33,6 +45,8 @@ export type UsageEventRecord = {
 
 export type RecordSuccessAndDebitInput = {
   accountId: string;
+  redactedCount?: number;
+  redactedTypes?: string[] | null;
   conversationId?: string | null;
   taskType: string;
   provider: string;
@@ -133,11 +147,11 @@ export async function insertEvent(
       `INSERT INTO usage_events (
          account_id, conversation_id, message_id, task_type, provider, outcome,
          tokens_input, tokens_output, native_cost, credits_charged,
-         fallback_used, override_used
+         fallback_used, override_used, org_id, redacted_count, redacted_types
        ) VALUES (
          $1::uuid, $2::uuid, $3::bigint, $4, $5, $6,
          $7, $8, $9, $10,
-         $11, $12
+         $11, $12, $13::uuid, $14, $15::text[]
        )
        RETURNING id::text AS id, created_at`,
       [
@@ -153,6 +167,9 @@ export async function insertEvent(
         input.creditsCharged ?? null,
         input.fallbackUsed ?? false,
         input.overrideUsed ?? false,
+        input.orgId ?? null,
+        input.redactedCount ?? 0,
+        input.redactedTypes ?? null,
       ]
     );
 
@@ -191,16 +208,98 @@ export async function attachMessage(
  * One transaction: insert usage_events, debit wallet, ledger row with reference_id.
  * Zero charge → usage row only (no ledger row).
  */
+/**
+ * Org-member variant of recordSuccessAndDebit: charges the org's shared pool,
+ * clamped to both the pool balance and the member's remaining monthly limit.
+ * The pool wallet row is locked first, which serializes every debit in the
+ * org — so the "spent this month" sum read after it is exact.
+ */
+async function debitOrgPool(
+  input: RecordSuccessAndDebitInput,
+  context: Extract<SpendContext, { kind: "org" }>
+): Promise<RecordSuccessAndDebitResult> {
+  return withPoolTransaction(async (client: PoolClient) => {
+    await runQuery(
+      client,
+      `INSERT INTO org_credit_wallets (org_id) VALUES ($1) ON CONFLICT (org_id) DO NOTHING`,
+      [context.orgId]
+    );
+    const locked: QueryResult<{ balance: string }> = await runQuery(
+      client,
+      `SELECT balance FROM org_credit_wallets WHERE org_id = $1 FOR UPDATE`,
+      [context.orgId]
+    );
+    const pool = asNumber(locked.rows[0]?.balance ?? 0);
+    const spent = await getMemberSpentThisMonth(context.orgId, input.accountId, client);
+    const room = remainingUnderLimit(context.monthlyLimit, spent);
+    const charged = Math.max(0, Math.min(input.creditsRequested, pool, room));
+    const balance = pool - charged;
+
+    const event = await insertEvent(
+      {
+        accountId: input.accountId,
+        conversationId: input.conversationId,
+        taskType: input.taskType,
+        provider: input.provider,
+        outcome: "success",
+        tokensInput: input.tokensInput,
+        tokensOutput: input.tokensOutput,
+        nativeCost: input.nativeCost,
+        creditsCharged: charged,
+        fallbackUsed: input.fallbackUsed,
+        overrideUsed: input.overrideUsed ?? false,
+        orgId: context.orgId,
+        redactedCount: input.redactedCount,
+        redactedTypes: input.redactedTypes,
+      },
+      client
+    );
+    if (!event) throw new Error("usage_events insert returned no row");
+
+    if (charged > 0) {
+      await runQuery(
+        client,
+        `INSERT INTO credit_ledger (
+           account_id, org_id, amount, reason, balance_after, reference_type, reference_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          input.accountId,
+          context.orgId,
+          -charged,
+          LedgerReason.DEBIT,
+          balance,
+          LedgerReferenceType.USAGE_EVENT,
+          event.id,
+        ]
+      );
+      await runQuery(
+        client,
+        `UPDATE org_credit_wallets SET balance = $2, updated_at = now() WHERE org_id = $1`,
+        [context.orgId, balance]
+      );
+    }
+
+    return { charged, balance, usageEventId: event.id };
+  });
+}
+
 export async function recordSuccessAndDebit(
   input: RecordSuccessAndDebitInput
 ): Promise<RecordSuccessAndDebitResult> {
   try {
     if (!isAccountUuid(input.accountId)) {
+      await applyDueRecurringGrant(input.accountId);
       const { charged, balance } = await debit(input.accountId, input.creditsRequested);
       return { charged, balance, usageEventId: null };
     }
 
-    return await withPoolTransaction(async (client: PoolClient) => {
+    const context = await getSpendContext(input.accountId);
+    if (context.kind === "org") {
+      return await debitOrgPool(input, context);
+    }
+
+    await applyDueRecurringGrant(input.accountId);
+    const result = await withPoolTransaction(async (client: PoolClient) => {
       await ensureWallet(input.accountId, client);
 
       const locked: QueryResult<{ balance: string }> = await runQuery(
@@ -225,6 +324,8 @@ export async function recordSuccessAndDebit(
           creditsCharged: charged,
           fallbackUsed: input.fallbackUsed,
           overrideUsed: input.overrideUsed ?? false,
+          redactedCount: input.redactedCount,
+          redactedTypes: input.redactedTypes,
         },
         client
       );
@@ -263,6 +364,9 @@ export async function recordSuccessAndDebit(
         usageEventId: event?.id ?? null,
       };
     });
+    // Pay-as-you-go: charge the saved card if this left the balance under the threshold.
+    if (result.charged > 0) void maybeAutoTopUp(input.accountId, result.balance);
+    return result;
   } catch (error: unknown) {
     logCaught("usage.service.recordSuccessAndDebit", error);
     throw error;

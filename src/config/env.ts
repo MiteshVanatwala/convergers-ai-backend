@@ -10,6 +10,8 @@ export type Env = {
   googleRedirectUri: string;
   sessionCookieName: string;
   sessionTtlDays: number;
+  /** Impersonation sessions are far shorter-lived than normal logins by design. */
+  impersonationTtlMinutes: number;
   adminSessionCookieName: string;
   adminSessionTtlDays: number;
   cookieSecure: boolean;
@@ -24,6 +26,38 @@ export type Env = {
   adminOperatorsReadRateLimitPerMin: number;
   /** Max mutating /admin/admins* calls per admin per minute. */
   adminOperatorsMutationRateLimitPerMin: number;
+  razorpayKeyId: string | undefined;
+  razorpayKeySecret: string | undefined;
+  razorpayWebhookSecret: string | undefined;
+  /** Seller details printed on GST invoices. Invoices are only issued when legal name + GSTIN are set. */
+  seller: {
+    legalName: string | undefined;
+    gstin: string | undefined;
+    address: string | undefined;
+    /** Optional SAC code for the service line — confirm with your CA. */
+    sacCode: string | undefined;
+    /** Invoice number prefix, e.g. "CAI" → CAI2627-000001. Keep it short: GST caps invoice numbers at 16 chars. */
+    invoicePrefix: string;
+  };
+  /**
+   * Transactional email. SMTP is used when SMTP_HOST is set, else Resend when
+   * RESEND_API_KEY is set; with neither, email is off (callers skip sending).
+   */
+  email: {
+    smtp: {
+      host: string | undefined;
+      port: number;
+      /** true = TLS from the start (port 465); false = STARTTLS (port 587). */
+      secure: boolean;
+      user: string | undefined;
+      pass: string | undefined;
+    };
+    resendApiKey: string | undefined;
+    /** Sender, e.g. "Aikya <noreply@convergers.ai>". Falls back to SMTP_FROM. */
+    from: string | undefined;
+    /** Where "Contact sales" submissions are emailed. */
+    salesInbox: string;
+  };
 };
 
 function splitOrigins(value: string | undefined, fallback: string): string[] {
@@ -63,6 +97,7 @@ export function loadEnv(): Env {
       process.env.GOOGLE_REDIRECT_URI?.trim() || "http://localhost:8787/auth/google/callback",
     sessionCookieName: process.env.SESSION_COOKIE_NAME?.trim() || "convergers_session",
     sessionTtlDays: positiveInt(process.env.SESSION_TTL_DAYS, 14),
+    impersonationTtlMinutes: positiveInt(process.env.IMPERSONATION_TTL_MINUTES, 30),
     adminSessionCookieName:
       process.env.ADMIN_SESSION_COOKIE_NAME?.trim() || "convergers_admin_session",
     adminSessionTtlDays: positiveInt(process.env.ADMIN_SESSION_TTL_DAYS, 7),
@@ -79,9 +114,52 @@ export function loadEnv(): Env {
       process.env.ADMIN_OPERATORS_MUTATION_RATE_LIMIT_PER_MIN,
       30
     ),
+    razorpayKeyId: process.env.RAZORPAY_KEY_ID?.trim() || undefined,
+    razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET?.trim() || undefined,
+    razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET?.trim() || undefined,
+    seller: {
+      legalName: process.env.SELLER_LEGAL_NAME?.trim() || undefined,
+      gstin: process.env.SELLER_GSTIN?.trim().toUpperCase() || undefined,
+      address: process.env.SELLER_ADDRESS?.trim() || undefined,
+      sacCode: process.env.INVOICE_SAC_CODE?.trim() || undefined,
+      invoicePrefix: (process.env.INVOICE_PREFIX?.trim() || "CAI").slice(0, 4).toUpperCase(),
+    },
+    email: {
+      smtp: {
+        host: process.env.SMTP_HOST?.trim() || undefined,
+        port: positiveInt(process.env.SMTP_PORT, 587),
+        secure: process.env.SMTP_SECURE === "true",
+        user: process.env.SMTP_USER?.trim() || undefined,
+        pass: process.env.SMTP_PASS || undefined,
+      },
+      resendApiKey: process.env.RESEND_API_KEY?.trim() || undefined,
+      from: process.env.EMAIL_FROM?.trim() || process.env.SMTP_FROM?.trim() || undefined,
+      salesInbox: process.env.SALES_INBOX_EMAIL?.trim() || "sales@convergers.ai",
+    },
   };
+}
+
+/**
+ * Env-only config gaps that silently break billing — logged once at startup.
+ * (Seller GST details can also be saved in the DB, so they're checked
+ * separately — see billing/seller-settings.service.ts.)
+ */
+export function billingConfigWarnings(env: Env = loadEnv()): string[] {
+  const warnings: string[] = [];
+  if (env.razorpayKeyId && !env.razorpayWebhookSecret) {
+    warnings.push(
+      "RAZORPAY_WEBHOOK_SECRET is not set: Razorpay webhooks will be rejected, so Pro/Team renewals won't add " +
+        "monthly credits and payments completed after the buyer closes the tab won't be credited. " +
+        "Set it from the Razorpay dashboard's webhook page."
+    );
+  }
+  return warnings;
 }
 
 export function primaryWebOrigin(env: Env = loadEnv()): string {
   return env.webOrigins[0] ?? "http://localhost:3000";
+}
+
+export function primaryAdminOrigin(env: Env = loadEnv()): string {
+  return env.adminOrigins[0] ?? "http://localhost:3002";
 }

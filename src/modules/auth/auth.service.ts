@@ -53,9 +53,9 @@ export async function upsertGoogleAccount(input: {
   emailVerified: boolean;
   name: string | null;
   pictureUrl: string | null;
-}): Promise<AccountRow> {
+}): Promise<AccountRow & { isNew: boolean }> {
   try {
-    return await withPoolTransaction(async (client: PoolClient): Promise<AccountRow> => {
+    return await withPoolTransaction(async (client: PoolClient): Promise<AccountRow & { isNew: boolean }> => {
       const byGoogleParams: [string] = [input.googleId];
       const byGoogle: QueryResult<AccountRow> = await client.query<AccountRow>(
         `SELECT id, email, name, avatar_url, auth_provider, status, created_at
@@ -83,7 +83,7 @@ export async function upsertGoogleAccount(input: {
         );
         await ensureWallet(updated.rows[0].id, client);
         await ensureFreePlanMembership(updated.rows[0].id, client, "migration");
-        return updated.rows[0];
+        return { ...updated.rows[0], isNew: false };
       }
 
       const byEmailParams: [string] = [input.email];
@@ -118,7 +118,7 @@ export async function upsertGoogleAccount(input: {
         );
         await ensureWallet(updated.rows[0].id, client);
         await ensureFreePlanMembership(updated.rows[0].id, client, "migration");
-        return updated.rows[0];
+        return { ...updated.rows[0], isNew: false };
       }
 
       const insertParams: [string, boolean, string, string | null, string | null] = [
@@ -140,10 +140,49 @@ export async function upsertGoogleAccount(input: {
       const created: AccountRow = inserted.rows[0];
       await grantSignupCredits(created.id, client);
       await ensureFreePlanMembership(created.id, client, "signup");
-      return created;
+      return { ...created, isNew: true };
     });
   } catch (error: unknown) {
     logCaught("auth.service.upsertGoogleAccount", error);
+    throw error;
+  }
+}
+
+/**
+ * Email-code sign-in: returns the account for this (now verified) email,
+ * creating it on first use the same way Google sign-up does (wallet, signup
+ * credits, Free plan). An existing Google account with this email is reused,
+ * so both sign-in methods land in one account.
+ */
+export async function upsertEmailAccount(email: string): Promise<AccountRow & { isNew: boolean }> {
+  try {
+    return await withPoolTransaction(async (client: PoolClient): Promise<AccountRow & { isNew: boolean }> => {
+      const existing: QueryResult<AccountRow> = await client.query<AccountRow>(
+        `UPDATE accounts
+         SET email_verified_at = COALESCE(email_verified_at, now()), updated_at = now()
+         WHERE email = $1
+         RETURNING id, email, name, avatar_url, auth_provider, status, created_at`,
+        [email]
+      );
+      if (existing.rows[0]) {
+        await ensureWallet(existing.rows[0].id, client);
+        await ensureFreePlanMembership(existing.rows[0].id, client, "migration");
+        return { ...existing.rows[0], isNew: false };
+      }
+
+      const inserted: QueryResult<AccountRow> = await client.query<AccountRow>(
+        `INSERT INTO accounts (email, email_verified_at, auth_provider, status)
+         VALUES ($1, now(), 'email', 'active')
+         RETURNING id, email, name, avatar_url, auth_provider, status, created_at`,
+        [email]
+      );
+      const created: AccountRow = inserted.rows[0];
+      await grantSignupCredits(created.id, client);
+      await ensureFreePlanMembership(created.id, client, "signup");
+      return { ...created, isNew: true };
+    });
+  } catch (error: unknown) {
+    logCaught("auth.service.upsertEmailAccount", error);
     throw error;
   }
 }
@@ -154,21 +193,42 @@ export async function createSession(input: {
   ip?: string | null;
   userAgent?: string | null;
   audience?: string;
+  /** When set, expires_at uses minutes instead of the default day-based TTL — impersonation sessions are short-lived by design. */
+  ttlMinutes?: number;
+  impersonatedBy?: string | null;
+  impersonationReason?: string | null;
+  client?: PoolClient;
 }): Promise<string> {
   try {
-    const pool = getPool();
+    const db = input.client ?? getPool();
     const ttlDays: number = loadEnv().sessionTtlDays;
-    const createParams: [string, string, string, number, string | null, string | null] = [
+    const useMinutes = input.ttlMinutes != null;
+    const ttlValue = useMinutes ? input.ttlMinutes! : ttlDays;
+    const expiresExpr = useMinutes
+      ? `now() + ($4::int * interval '1 minute')`
+      : `now() + ($4::int * interval '1 day')`;
+    const createParams: [
+      string,
+      string,
+      string,
+      number,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+    ] = [
       input.accountId,
       hashToken(input.token),
       input.audience ?? "web",
-      ttlDays,
+      ttlValue,
       input.ip ?? null,
       input.userAgent ?? null,
+      input.impersonatedBy ?? null,
+      input.impersonationReason ?? null,
     ];
-    const result: QueryResult<{ id: string }> = await pool.query<{ id: string }>(
-      `INSERT INTO sessions (account_id, token_hash, audience, expires_at, ip_address, user_agent)
-       VALUES ($1, $2, $3, now() + ($4::int * interval '1 day'), $5::inet, $6)
+    const result: QueryResult<{ id: string }> = await db.query<{ id: string }>(
+      `INSERT INTO sessions (account_id, token_hash, audience, expires_at, ip_address, user_agent, impersonated_by, impersonation_reason)
+       VALUES ($1, $2, $3, ${expiresExpr}, $5::inet, $6, $7, $8)
        RETURNING id`,
       createParams
     );
@@ -210,9 +270,12 @@ export async function resolveSession(token: string): Promise<SessionAccount | nu
     const result: QueryResult<SessionAccount> = await pool.query<SessionAccount>(
       `SELECT
          a.id, a.email, a.name, a.avatar_url, a.auth_provider, a.status, a.created_at,
-         s.id AS session_id
+         s.id AS session_id,
+         s.impersonated_by,
+         COALESCE(au.username, au.email)::text AS impersonator_label
        FROM sessions s
        JOIN accounts a ON a.id = s.account_id
+       LEFT JOIN admin_users au ON au.id = s.impersonated_by
        WHERE s.token_hash = $1
          AND s.revoked_at IS NULL
          AND s.expires_at > now()
@@ -259,6 +322,70 @@ export async function updateProfileName(
     return result.rows[0] ?? null;
   } catch (error: unknown) {
     logCaught("auth.service.updateProfileName", error);
+    throw error;
+  }
+}
+
+export type PersonalizationSettings = {
+  defaultModelId: string | null;
+  filterSensitiveData: boolean;
+};
+
+export async function getPersonalizationSettings(accountId: string): Promise<PersonalizationSettings> {
+  try {
+    const pool = getPool();
+    const result: QueryResult<{
+      default_provider_override: string | null;
+      filter_sensitive_data: boolean;
+    }> = await pool.query(
+      `SELECT default_provider_override, filter_sensitive_data
+       FROM personalization_settings WHERE account_id = $1`,
+      [accountId]
+    );
+    const row = result.rows[0];
+    return {
+      defaultModelId: row?.default_provider_override ?? null,
+      filterSensitiveData: row?.filter_sensitive_data ?? false,
+    };
+  } catch (error: unknown) {
+    logCaught("auth.service.getPersonalizationSettings", error);
+    throw error;
+  }
+}
+
+/** Read-modify-write: only the provided fields change, everything else keeps its current value. */
+export async function updatePersonalizationSettings(
+  accountId: string,
+  input: { defaultModelId?: string | null; filterSensitiveData?: boolean }
+): Promise<"ok" | "invalid_model"> {
+  try {
+    const pool = getPool();
+    if (input.defaultModelId !== undefined && input.defaultModelId !== null) {
+      const check: QueryResult<{ exists: boolean }> = await pool.query(
+        `SELECT true AS exists FROM provider_registry
+         WHERE id = $1 AND visible_to_users = true AND status = 'active'`,
+        [input.defaultModelId]
+      );
+      if (!check.rows[0]) return "invalid_model";
+    }
+
+    const current = await getPersonalizationSettings(accountId);
+    const nextDefaultModelId =
+      input.defaultModelId !== undefined ? input.defaultModelId : current.defaultModelId;
+    const nextFilterSensitiveData =
+      input.filterSensitiveData !== undefined ? input.filterSensitiveData : current.filterSensitiveData;
+
+    await pool.query(
+      `INSERT INTO personalization_settings (account_id, default_provider_override, filter_sensitive_data)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (account_id) DO UPDATE SET
+         default_provider_override = EXCLUDED.default_provider_override,
+         filter_sensitive_data = EXCLUDED.filter_sensitive_data`,
+      [accountId, nextDefaultModelId, nextFilterSensitiveData]
+    );
+    return "ok";
+  } catch (error: unknown) {
+    logCaught("auth.service.updatePersonalizationSettings", error);
     throw error;
   }
 }
