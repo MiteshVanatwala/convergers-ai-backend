@@ -15,6 +15,12 @@ export function isValidGstin(gstin: string): boolean {
 }
 
 export function stateName(code: string | null | undefined): string | null {
+  if (!code) return null;
+  if (!Array.isArray(GST_STATES)) {
+    throw new Error(
+      "GST_STATES is missing from @convergers-ai/shared-types — run `npm run build` in shared-types, reinstall into backend, and restart."
+    );
+  }
   return GST_STATES.find((s) => s.code === code)?.name ?? null;
 }
 
