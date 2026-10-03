@@ -14,6 +14,7 @@ import {
 import * as usageService from "../usage/usage.service";
 import * as conversationsService from "./conversations.service";
 import { generateConversationTitle } from "./title.service";
+import type { ClientType } from "./conversations.service";
 
 type IdParams = { id: string };
 
@@ -244,6 +245,12 @@ export async function chatStream(
     return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid conversationId", 400);
   }
 
+  const clientTypeRaw = (body as any).client_type;
+  const clientType: ClientType =
+    clientTypeRaw === "ide" || clientTypeRaw === "mobile" || clientTypeRaw === "api"
+      ? clientTypeRaw
+      : "web";
+
   const res = writeSseHeaders(request, reply);
   const send = (event: string, data: unknown) => {
     if (res.destroyed) return;
@@ -255,6 +262,23 @@ export async function chatStream(
     // out-of-credits request leaves nothing behind. (handleStreamRequest
     // re-checks for the other entry points.)
     await assertHasCredits(account.id);
+    // IDE requests are local-only — skip conversation row creation and message persistence
+    if (clientType === "ide") {
+      const routeBody = {
+        input,
+        ...(body.modality_hint ? { modality_hint: body.modality_hint } : {}),
+        ...(body.policy ? { policy: body.policy } : {}),
+      };
+      const result: RouteResponse = await handleStreamRequest(
+        routeBody,
+        account.id,
+        (text) => send("delta", { text }),
+        (event) => send("stage", event),
+        {}
+      );
+      send("done", { ...result });
+      return;
+    }
 
     let conversation = requestedId
       ? await conversationsService.getConversationForAccount(account.id, requestedId)
@@ -269,7 +293,8 @@ export async function chatStream(
     if (!conversation) {
       conversation = await conversationsService.createConversation(
         account.id,
-        conversationsService.provisionalTitle(input)
+        conversationsService.provisionalTitle(input),
+        clientType
       );
       created = true;
     }

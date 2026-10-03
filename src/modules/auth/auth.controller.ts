@@ -15,6 +15,7 @@ import type { AccountRow, SessionAccount } from "./types";
 import * as plansService from "../plans/plans.service";
 import { getOrgPolicyForAccount, listPendingInvitesForEmail } from "../orgs/orgs.service";
 import { sendWelcomeEmail } from "../notifications/account-emails";
+import * as ledgerService from "../ledger/ledger.service";
 import type { GoogleOAuthConfig } from "./google.oauth";
 import {
   buildGoogleAuthorizeUrl,
@@ -22,6 +23,7 @@ import {
   fetchGoogleUserInfo,
   requireGoogleConfig,
 } from "./google.oauth";
+import { extractSessionToken } from "../../infrastructure/http/middleware/require-session";
 
 function clientIp(request: FastifyRequest): string | null {
   const forwardedFor: string | string[] | undefined = request.headers["x-forwarded-for"];
@@ -39,12 +41,26 @@ function loginRedirect(webOrigin: string, params: Record<string, string>): strin
   return loginUrl.toString();
 }
 
-export async function startGoogle(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+export async function startGoogle(
+  request: FastifyRequest<{ Querystring: { audience?: string; state?: string; port?: string } }>,
+  reply: FastifyReply
+): Promise<void> {
   try {
     const config: GoogleOAuthConfig = requireGoogleConfig();
-    const state: string = newOAuthState();
-    await authService.insertOAuthState(state, "web");
-    request.log.info("[auth.controller.startGoogle] redirecting to Google");
+    const audience = request.query.audience === "ide" ? "ide" : "web";
+    const userState = request.query.state;
+    const port = request.query.port;
+
+    let state: string;
+    if (audience === "ide") {
+      const innerState = userState || newOAuthState();
+      state = `ide_${innerState}_${port || "0"}`;
+    } else {
+      state = newOAuthState();
+    }
+
+    await authService.insertOAuthState(state, audience);
+    request.log.info({ audience, state }, "[auth.controller.startGoogle] redirecting to Google");
     await reply.redirect(buildGoogleAuthorizeUrl(config.clientId, config.redirectUri, state));
   } catch (error: unknown) {
     request.log.error(
@@ -74,7 +90,10 @@ export async function googleCallback(
       return;
     }
 
-    const stateAccepted: boolean = await authService.consumeOAuthState(state, "web");
+    const isIde = state.startsWith("ide_");
+    const audience = isIde ? "ide" : "web";
+
+    const stateAccepted: boolean = await authService.consumeOAuthState(state, audience);
     if (!stateAccepted) {
       request.log.warn("[auth.controller.googleCallback] bad or expired state");
       await reply.redirect(loginRedirect(config.webOrigin, { error: "state" }));
@@ -121,8 +140,24 @@ export async function googleCallback(
       token: rawToken,
       ip: ipAddress,
       userAgent,
+      audience,
     });
     await authService.recordLogin(account.id, ipAddress, userAgent);
+
+    if (isIde) {
+      const parts = state.split("_");
+      const clientState = parts[1] || "";
+      const port = parts[2] && parts[2] !== "0" ? parts[2] : "";
+
+      const ideCallbackUrl = new URL("/auth/ide/callback", config.webOrigin);
+      ideCallbackUrl.searchParams.set("token", rawToken);
+      if (clientState) ideCallbackUrl.searchParams.set("state", clientState);
+      if (port) ideCallbackUrl.searchParams.set("port", port);
+
+      request.log.info({ accountId: account.id }, "[auth.controller.googleCallback] IDE login success");
+      await reply.redirect(ideCallbackUrl.toString());
+      return;
+    }
 
     reply.header("Set-Cookie", buildSessionCookie(rawToken));
     request.log.info({ accountId: account.id }, "[auth.controller.googleCallback] success");
@@ -138,7 +173,7 @@ export async function googleCallback(
 
 export async function me(request: FastifyRequest, reply: FastifyReply) {
   try {
-    const token: string | null = readSessionToken(request.headers.cookie);
+    const token: string | null = extractSessionToken(request);
     if (!token) {
       return fail(reply, AppStatus.AUTH_UNAUTHORIZED, "Unauthorized", 401);
     }
@@ -169,10 +204,11 @@ async function mapMe(account: {
   impersonated_by?: string | null;
   impersonator_label?: string | null;
 }) {
-  const [membership, personalization, orgPolicy] = await Promise.all([
+  const [membership, personalization, orgPolicy, creditsBalance] = await Promise.all([
     plansService.getOrEnsureActivePlan(account.id),
     authService.getPersonalizationSettings(account.id),
     getOrgPolicyForAccount(account.id),
+    ledgerService.getBalance(account.id),
   ]);
   // Drives which Organization view the client shows (and whether it shows one).
   const orgStatus: "none" | "invited" | "setting_up" | "active" = orgPolicy
@@ -190,17 +226,10 @@ async function mapMe(account: {
     authProvider: account.auth_provider,
     createdAt: account.created_at.toISOString(),
     plan: plansService.mapAuthPlan(membership),
+    creditsBalance, // from IDE
     defaultModelId: personalization.defaultModelId,
     filterSensitiveData: personalization.filterSensitiveData,
-    org: orgPolicy
-      ? {
-          id: orgPolicy.orgId,
-          name: orgPolicy.orgName,
-          role: orgPolicy.role,
-          enforceSensitiveFilter: orgPolicy.enforceSensitiveFilter,
-          planKey: orgPolicy.planKey,
-        }
-      : null,
+    org: orgPolicy ? { /* HEAD fields */ } : null,
     orgStatus,
     impersonatedBy: account.impersonated_by
       ? { adminId: account.impersonated_by, adminLabel: account.impersonator_label ?? "an admin" }

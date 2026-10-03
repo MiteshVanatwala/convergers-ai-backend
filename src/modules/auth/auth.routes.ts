@@ -3,7 +3,10 @@ import * as authController from "./auth.controller";
 import * as emailLoginController from "./email-login.controller";
 
 export function registerAuthRoutes(app: FastifyInstance): void {
-  app.get("/auth/google/start", (request, reply) => authController.startGoogle(request, reply));
+  app.get<{ Querystring: { audience?: string; state?: string; port?: string } }>(
+    "/auth/google/start",
+    (request, reply) => authController.startGoogle(request, reply)
+  );
 
   app.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
     "/auth/google/callback",
