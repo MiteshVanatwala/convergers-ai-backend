@@ -12,6 +12,8 @@ import {
   userFacingPayload,
 } from "../brain";
 import * as usageService from "../usage/usage.service";
+import { expandHistoryArtifacts, storeAnswerArtifacts } from "../artifacts/chat-artifacts";
+import { storeAnswerImages } from "../artifacts/chat-images";
 import * as conversationsService from "./conversations.service";
 import { generateConversationTitle } from "./title.service";
 
@@ -282,9 +284,14 @@ export async function chatStream(
     const priorMessages = created
       ? []
       : await conversationsService.listMessages(account.id, conversation.id, 20);
-    const history = priorMessages
-      .filter((m) => m.status === "complete" && (m.role === "user" || m.role === "assistant"))
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    // Artifact references in earlier answers are expanded back into their
+    // source so the model can keep editing them.
+    const history = await expandHistoryArtifacts(
+      account.id,
+      priorMessages
+        .filter((m) => m.status === "complete" && (m.role === "user" || m.role === "assistant"))
+        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }))
+    );
 
     await conversationsService.insertMessage({
       conversationId: conversation.id,
@@ -302,13 +309,28 @@ export async function chatStream(
       ...(history.length > 0 ? { history } : {}),
     };
 
-    const result: RouteResponse = await handleStreamRequest(
+    const rawResult: RouteResponse = await handleStreamRequest(
       routeBody,
       account.id,
       (text) => send("delta", { text }),
       (event) => send("stage", event),
-      { conversationId: conversation.id }
+      { conversationId: conversation.id },
+      { artifacts: true }
     );
+
+    // Generated images and artifacts go to object storage and are swapped
+    // for links/references before the answer is saved.
+    const withImages = await storeAnswerImages({
+      accountId: account.id,
+      conversationId: conversation.id,
+      content: rawResult.content,
+    });
+    const stored = await storeAnswerArtifacts({
+      accountId: account.id,
+      conversationId: conversation.id,
+      content: withImages.content,
+    });
+    const result: RouteResponse = { ...rawResult, content: stored.content };
 
     const assistantMessage = await conversationsService.insertMessage({
       conversationId: conversation.id,

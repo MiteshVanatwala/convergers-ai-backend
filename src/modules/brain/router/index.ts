@@ -4,6 +4,12 @@ import type { ClassificationMethod, TaskType } from "../classifier";
 import type { ProviderAdapter, ProviderResponse } from "../adapters/types";
 import { haikuAdapter, sonnetAdapter, opusAdapter } from "../adapters/anthropic";
 import { openaiImageAdapter } from "../adapters/openai";
+import {
+  geminiFlashImageAdapter,
+  geminiFlashLiteImageAdapter,
+  geminiProImageAdapter,
+} from "../adapters/geminiImage";
+import { claudeImageAdapter } from "../adapters/claudeImage";
 import { deepseekFlashAdapter, deepseekProAdapter } from "../adapters/deepseek";
 import { glmAdapter, glmFlashAdapter } from "../adapters/glm";
 import { kimiAdapter, kimiCodeAdapter } from "../adapters/kimi";
@@ -34,6 +40,10 @@ const ADAPTER_LOOKUP: Record<string, ProviderAdapter> = {
   [sonnetAdapter.id]: sonnetAdapter,
   [opusAdapter.id]: opusAdapter,
   [openaiImageAdapter.id]: openaiImageAdapter,
+  [geminiFlashImageAdapter.id]: geminiFlashImageAdapter,
+  [geminiProImageAdapter.id]: geminiProImageAdapter,
+  [geminiFlashLiteImageAdapter.id]: geminiFlashLiteImageAdapter,
+  [claudeImageAdapter.id]: claudeImageAdapter,
   [deepseekFlashAdapter.id]: deepseekFlashAdapter,
   [deepseekProAdapter.id]: deepseekProAdapter,
   [glmAdapter.id]: glmAdapter,
@@ -51,7 +61,7 @@ const ADAPTER_LOOKUP: Record<string, ProviderAdapter> = {
   [openrouterAdapter.id]: openrouterAdapter,
 };
 
-const TASK_TYPES: TaskType[] = ["text", "code", "image", "voice", "video", "research", "plan"];
+const TASK_TYPES: TaskType[] = ["text", "code", "image", "voice", "video", "research", "plan", "artifact"];
 
 function emptyHierarchy(): Record<TaskType, ProviderAdapter[]> {
   const hierarchy = {} as Record<TaskType, ProviderAdapter[]>;
@@ -231,7 +241,11 @@ async function resolveRouteChain(
     };
   }
 
-  const chain = await resolveChain(taskType, accountId, ctx);
+  const fullChain = await resolveChain(taskType, accountId, ctx);
+  // Skip models that can't do this particular request (e.g. animation on a
+  // still-image model) — unless none can, then let the chain try anyway.
+  const capable = fullChain.filter((a) => !a.canHandle || a.canHandle(request));
+  const chain = capable.length > 0 ? capable : fullChain;
   if (!allowed) return { chain, explicitPick: false };
 
   // Org admins restricted the models — only route among the allowed ones.

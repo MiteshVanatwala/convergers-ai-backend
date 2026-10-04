@@ -53,7 +53,7 @@ export type TierAccessEntry = {
   planKeys: string[];
 };
 
-const TASK_TYPES = ["text", "code", "research", "plan", "image", "voice", "video"] as const;
+const TASK_TYPES = ["text", "code", "research", "plan", "artifact", "image", "voice", "video"] as const;
 
 export async function listCredentials(): Promise<CredentialInfo[]> {
   try {

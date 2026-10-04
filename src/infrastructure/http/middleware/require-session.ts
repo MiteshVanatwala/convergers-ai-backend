@@ -29,3 +29,15 @@ export async function requireSession(
   request.account = account;
   return account;
 }
+
+/**
+ * The signed-in account when there is a valid session, otherwise null —
+ * never replies. For routes anonymous visitors may also use (shared links).
+ */
+export async function optionalSession(request: FastifyRequest): Promise<SessionAccount | null> {
+  const token: string | null = readSessionToken(request.headers.cookie);
+  if (!token) return null;
+  const account = await resolveSession(token);
+  if (account) request.account = account;
+  return account;
+}

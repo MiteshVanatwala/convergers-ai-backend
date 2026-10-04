@@ -8,6 +8,8 @@ import { registerConversationRoutes } from "../../modules/conversations/conversa
 import { registerProjectRoutes } from "../../modules/projects/projects.routes";
 import { registerOrgRoutes } from "../../modules/orgs/orgs.routes";
 import { registerSalesRoutes } from "../../modules/sales/sales.routes";
+import { registerArtifactRoutes } from "../../modules/artifacts/artifacts.routes";
+import { registerVoiceRoutes } from "../../modules/voice/voice.routes";
 import { registerUsageRoutes } from "../../modules/usage/usage.routes";
 import { registerPlanRoutes } from "../../modules/plans/plans.routes";
 import { registerBillingRoutes, registerRazorpayWebhookRoute } from "../../modules/billing/billing.routes";
@@ -26,6 +28,8 @@ export async function buildServer() {
   registerProjectRoutes(app);
   registerOrgRoutes(app);
   registerSalesRoutes(app);
+  registerArtifactRoutes(app);
+  registerVoiceRoutes(app);
   registerUsageRoutes(app);
   registerPlanRoutes(app);
   registerBillingRoutes(app);

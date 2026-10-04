@@ -58,6 +58,26 @@ export type Env = {
     /** Where "Contact sales" submissions are emailed. */
     salesInbox: string;
   };
+  /**
+   * Generated files (images, artifacts, audio). "local" writes under
+   * `localDir` (development); "s3" uses an S3 bucket (production) — any
+   * S3-compatible store works via `endpoint` (Cloudflare R2, MinIO…).
+   */
+  storage: {
+    driver: "local" | "s3";
+    localDir: string;
+    s3: {
+      bucket: string | undefined;
+      region: string | undefined;
+      /** Optional custom endpoint for S3-compatible stores. */
+      endpoint: string | undefined;
+      /** Optional key prefix inside the bucket, e.g. "prod/". */
+      prefix: string;
+      /** Optional static credentials; omitted = the AWS default chain (IAM role, env, profile). */
+      accessKeyId: string | undefined;
+      secretAccessKey: string | undefined;
+    };
+  };
 };
 
 function splitOrigins(value: string | undefined, fallback: string): string[] {
@@ -135,6 +155,18 @@ export function loadEnv(): Env {
       resendApiKey: process.env.RESEND_API_KEY?.trim() || undefined,
       from: process.env.EMAIL_FROM?.trim() || process.env.SMTP_FROM?.trim() || undefined,
       salesInbox: process.env.SALES_INBOX_EMAIL?.trim() || "sales@convergers.ai",
+    },
+    storage: {
+      driver: process.env.STORAGE_DRIVER?.trim() === "s3" ? "s3" : "local",
+      localDir: process.env.STORAGE_LOCAL_DIR?.trim() || "storage",
+      s3: {
+        bucket: process.env.S3_BUCKET?.trim() || undefined,
+        region: process.env.S3_REGION?.trim() || process.env.AWS_REGION?.trim() || undefined,
+        endpoint: process.env.S3_ENDPOINT?.trim() || undefined,
+        prefix: process.env.S3_PREFIX?.trim() || "",
+        accessKeyId: process.env.S3_ACCESS_KEY_ID?.trim() || undefined,
+        secretAccessKey: process.env.S3_SECRET_ACCESS_KEY?.trim() || undefined,
+      },
     },
   };
 }

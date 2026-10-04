@@ -106,6 +106,19 @@ const MIGRATIONS: Migration[] = [
     file: "remove_mistral.sql",
     detect: `SELECT NOT EXISTS (SELECT 1 FROM provider_credentials WHERE id = 'mistral') AS applied`,
   },
+  { file: "artifacts_v1.sql", detect: table("artifacts") },
+  {
+    file: "images_v1.sql",
+    detect: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'gemini:gemini-3.1-flash-image') AS applied`,
+  },
+  {
+    file: "voice_v1.sql",
+    detect: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'groq:whisper-large-v3-turbo') AS applied`,
+  },
+  {
+    file: "images_v2.sql",
+    detect: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'anthropic:claude-sonnet-5-5-image') AS applied`,
+  },
 ];
 
 const DB_DIR = join(__dirname, "..", "db");

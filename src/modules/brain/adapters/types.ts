@@ -9,11 +9,35 @@ import type { TokenUsage } from "./pricing";
  * - `maxOutputTokens` lowers the adapter's output cap — the router sets it to
  *   what the account's credit balance can pay for (router/credits.ts).
  */
-export type BrainRequest = RouteRequest & { systemNote?: string; maxOutputTokens?: number };
+export type BrainRequest = RouteRequest & {
+  systemNote?: string;
+  maxOutputTokens?: number;
+  /** Chat only: let the model put standalone deliverables in <artifact> blocks (see ARTIFACT_GUIDE). */
+  enableArtifacts?: boolean;
+};
+
+/**
+ * How a model creates artifacts in chat. The backend lifts each <artifact>
+ * block out of the answer, stores it, and shows it as a card the user can
+ * open, share and keep editing (modules/artifacts).
+ */
+export const ARTIFACT_GUIDE = `Artifacts: when the user asks for a standalone deliverable they will open, reuse or share — a web page or app, an interactive tool, a dashboard, an SVG graphic, icon or illustration, a diagram, or a substantial document (roughly 20+ lines) — put it in an artifact:
+
+<artifact identifier="short-kebab-case-id" type="html" title="Short title">
+...complete content...
+</artifact>
+
+- type is one of: html (a complete standalone HTML document; inline CSS and JS; scripts only from cdnjs.cloudflare.com or cdn.jsdelivr.net), react (one component file with a default export; only React is available, use Tailwind classes for styling, no other imports), svg (a single <svg> element), mermaid (Mermaid diagram source), markdown (a formatted document), code (a long code file; add language="python" etc.).
+- Write one or two sentences before the artifact saying what you made. Never put the artifact inside a code fence.
+- To change an existing artifact, reuse its identifier and output the complete new version — never a partial diff.
+- Don't use artifacts for short snippets, quick answers, explanations or conversation.`;
 
 export function withSystemNote(basePrompt: string, request: RouteRequest): string {
-  const note = (request as BrainRequest).systemNote;
-  return note ? `${basePrompt}\n\n${note}` : basePrompt;
+  const brain = request as BrainRequest;
+  const parts = [basePrompt];
+  if (brain.enableArtifacts) parts.push(ARTIFACT_GUIDE);
+  if (brain.systemNote) parts.push(brain.systemNote);
+  return parts.join("\n\n");
 }
 
 /** The adapter's own cap, lowered to the Brain's `maxOutputTokens` when that's smaller. */
@@ -41,6 +65,12 @@ export interface ProviderAdapter {
   /** provider_credentials id this adapter authenticates with — decides own key (BYOK) vs master key. */
   keyProviderId: string;
   cost: AdapterCost;
+  /**
+   * False when this model can't do what the request asks (e.g. an animated
+   * GIF from a still-image model). Auto routing skips it; an explicit pick
+   * is still honored. Omitted means "can handle anything of its task type".
+   */
+  canHandle?(request: RouteRequest): boolean;
   /**
    * `accountId` drives per-account key resolution (own key vs. master key,
    * tier-gated — see accountKeyResolver.ts). `null` is for internal calls

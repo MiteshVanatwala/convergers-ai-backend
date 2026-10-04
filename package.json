@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
+    "@aws-sdk/client-s3": "^3.1146.0",
     "@convergers-ai/shared-types": "file:../shared-types",
     "@fastify/cors": "^9.0.1",
     "dotenv": "^17.4.2",

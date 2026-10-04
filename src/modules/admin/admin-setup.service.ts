@@ -2,6 +2,7 @@ import type { QueryResult } from "pg";
 import { getRazorpayClient } from "../billing/razorpay-client";
 import { billingConfigWarnings, loadEnv } from "../../config/env";
 import { getPool } from "../../infrastructure/db/pool";
+import { storageLabel } from "../../infrastructure/storage/object-storage";
 import { emailProviderLabel } from "../../infrastructure/email/send-email";
 import { logCaught } from "../../shared/utils/log";
 import { PROVIDERS, isConfigured } from "../brain/adapters/keyStore";
@@ -104,6 +105,21 @@ const MIGRATION_PROBES: { file: string; purpose: string; sql: string }[] = [
     file: "email_login_v1.sql",
     purpose: "Sign in with an emailed one-time code",
     sql: `SELECT to_regclass('public.email_login_codes') IS NOT NULL AS applied`,
+  },
+  {
+    file: "artifacts_v1.sql",
+    purpose: "Artifacts (pages, apps, diagrams, documents) and sharing",
+    sql: `SELECT to_regclass('public.artifacts') IS NOT NULL AS applied`,
+  },
+  {
+    file: "images_v1.sql",
+    purpose: "Gemini image models ahead of gpt-image-1",
+    sql: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'gemini:gemini-3.1-flash-image') AS applied`,
+  },
+  {
+    file: "voice_v1.sql",
+    purpose: "Voice input and read-aloud models",
+    sql: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'groq:whisper-large-v3-turbo') AS applied`,
   },
 ];
 
@@ -401,6 +417,83 @@ function signInGroup(): SetupGroup {
   return { id: "signin", title: "Sign-in, sessions & email", checks };
 }
 
+function filesGroup(): SetupGroup {
+  const env = loadEnv();
+  const { storage } = env;
+  const checks: SetupCheck[] = [];
+  if (storage.driver === "s3") {
+    const missing = [
+      !storage.s3.bucket && "S3_BUCKET",
+      !storage.s3.region && "S3_REGION",
+    ].filter(Boolean);
+    checks.push(
+      missing.length === 0
+        ? { id: "storage", label: "File storage", status: "ok", detail: `Generated images, artifacts and audio are stored in ${storageLabel()}.` }
+        : {
+            id: "storage",
+            label: "File storage",
+            status: "error",
+            detail: "STORAGE_DRIVER is s3 but the bucket isn't fully configured — saving images and artifacts will fail.",
+            fix: `Set ${missing.join(" and ")} in backend/.env (plus S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY unless the server has an IAM role).`,
+          }
+    );
+  } else {
+    checks.push(
+      env.cookieSecure
+        ? {
+            id: "storage",
+            label: "File storage",
+            status: "warn",
+            detail: `Files are on ${storageLabel()} — they're lost if the server is replaced and aren't shared between servers.`,
+            fix: "Set STORAGE_DRIVER=s3 with S3_BUCKET and S3_REGION in backend/.env for production.",
+          }
+        : { id: "storage", label: "File storage", status: "ok", detail: `Files are on ${storageLabel()} (fine for development).` }
+    );
+  }
+  const gemini = isConfigured("gemini");
+  const groq = isConfigured("groq");
+  const imageModels = [
+    gemini && "Gemini",
+    isConfigured("anthropic") && "Claude (code-drawn images and GIFs)",
+    isConfigured("openai") && "gpt-image-1",
+  ].filter(Boolean);
+  checks.push(
+    imageModels.length > 0
+      ? { id: "images", label: "Image generation", status: "ok", detail: `In order of the Image routing tab: ${imageModels.join(", ")}.` }
+      : {
+          id: "images",
+          label: "Image generation",
+          status: "warn",
+          detail: "No Gemini, Anthropic or OpenAI key — image requests will fail.",
+          fix: "Add a Google Gemini key on the API Keys page.",
+        },
+    groq
+      ? { id: "voice_in", label: "Voice input", status: "ok", detail: "Groq Whisper." }
+      : {
+          id: "voice_in",
+          label: "Voice input",
+          status: "warn",
+          detail: "No Groq key — the mic button can't transcribe.",
+          fix: "Add a Groq key on the API Keys page.",
+        },
+    gemini || groq
+      ? {
+          id: "voice_out",
+          label: "Read aloud",
+          status: "ok",
+          detail: "Gemini TTS, then Groq Orpheus (English). The browser's own voice is used if neither answers.",
+        }
+      : {
+          id: "voice_out",
+          label: "Read aloud",
+          status: "warn",
+          detail: "No Gemini or Groq key — answers are read with the browser's built-in voice.",
+          fix: "Add a Google Gemini key on the API Keys page.",
+        }
+  );
+  return { id: "files", title: "Files, images & voice", checks };
+}
+
 async function countPendingInvoices(): Promise<number> {
   const result: QueryResult<{ n: string }> = await getPool().query(
     `SELECT (
@@ -428,7 +521,7 @@ export async function getSetupChecklist(): Promise<{ groups: SetupGroup[]; warni
     const b2bWithoutSac = invoicesTableExists ? await countB2bInvoicesWithoutSac() : null;
     const payments = await paymentsGroup();
     payments.checks.push(...(await invoicingChecks(pending, b2bWithoutSac)));
-    const groups = [payments, database, await providersGroup(), signInGroup()];
+    const groups = [payments, database, await providersGroup(), filesGroup(), signInGroup()];
     return { groups, warnings: billingConfigWarnings() };
   } catch (error: unknown) {
     logCaught("admin.setup.service.getSetupChecklist", error);

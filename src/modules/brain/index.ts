@@ -52,9 +52,12 @@ const REDACTION_NOTE =
 
 /** Public requests can't set Brain-internal fields (e.g. inject a system note). */
 function sanitize(request: RouteRequest): RouteRequest {
-  const { systemNote: _ignored, ...clean } = request as BrainRequest;
+  const { systemNote: _note, enableArtifacts: _artifacts, maxOutputTokens: _max, ...clean } = request as BrainRequest;
   return clean;
 }
+
+/** Internal options for the chat entry point (never settable by the request body). */
+export type ChatOptions = { artifacts?: boolean };
 
 /** Adds what was masked to the usage context, so the usage event records it (counts only). */
 function withRedaction(
@@ -115,10 +118,11 @@ export async function handleStreamRequest(
   accountId: string,
   onDelta: (text: string) => void,
   onStage?: (event: StageEvent) => void,
-  ctx?: RouteUsageContext
+  ctx?: RouteUsageContext,
+  options: ChatOptions = {}
 ): Promise<RouteResponse> {
   await assertHasCredits(accountId);
-  const request = sanitize(rawRequest);
+  const request: BrainRequest = { ...sanitize(rawRequest), ...(options.artifacts ? { enableArtifacts: true } : {}) };
   if (!(await isSensitiveFilterEnabled(accountId))) {
     const { taskType, method } = await classifyRequest(request);
     onStage?.({ stage: "classify", taskType, method });

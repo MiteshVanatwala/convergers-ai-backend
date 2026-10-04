@@ -17,12 +17,13 @@ const CLASSIFIER_CHAIN: ProviderAdapter[] = [haikuAdapter, deepseekFlashAdapter,
 const CLASSIFIER_TIMEOUT_MS = 2500;
 
 /** Only categories with a configured model chain — never voice/video (no providers yet). */
-export const MODEL_CLASSIFIABLE: readonly TaskType[] = ["text", "code", "image", "research", "plan"];
+export const MODEL_CLASSIFIABLE: readonly TaskType[] = ["text", "code", "image", "research", "plan", "artifact"];
 
 const MAX_CONTEXT_CHARS = 600;
 
 const PROMPT = `Classify the user's latest request into exactly one category.
 
+artifact — building a standalone thing to open, reuse or share: a web page, app, interactive tool, dashboard, SVG graphic, diagram, or formatted document
 code     — writing, explaining, reviewing, or debugging software, scripts, SQL, configs, or building something programmatically
 image    — generating or editing a picture, illustration, logo, or other visual
 research — investigating a topic in depth: comparing options, analysing markets, trends, studies, or pros and cons

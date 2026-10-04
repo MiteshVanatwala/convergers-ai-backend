@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type { ProviderAdapter, ProviderResponse } from "./types";
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import { resolveKeyForAccount } from "./accountKeyResolver";
+import { wantsAnimation } from "./imageRequest";
 
 // Constructed fresh per call, not cached — see anthropic.ts for why.
 async function getClient(accountId: string | null): Promise<OpenAI> {
@@ -20,14 +21,14 @@ const IMAGE_FLAT_COST_USD = 0.04;
  * OpenAI's gpt-image-1 — the first non-Anthropic provider wired up, proving
  * the router's hierarchy isn't Anthropic-specific (see router/index.ts).
  * Image generation has no token-by-token output, so `streamCall` just
- * generates the whole image and emits it as a single "delta" — the existing
- * streaming UI (built for text) renders it unmodified because the image
- * comes back as a markdown image tag, not a special content type.
+ * generates the whole image. It comes back as a markdown data-URI image tag,
+ * which the chat controller moves into object storage before saving.
  */
 export const openaiImageAdapter: ProviderAdapter = {
   id: "openai:gpt-image-1",
   keyProviderId: "openai",
   cost: { kind: "flat", usd: IMAGE_FLAT_COST_USD },
+  canHandle: (request) => !wantsAnimation(request.input),
   async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
     const client = await getClient(accountId);
     const response = await client.images.generate({
@@ -57,11 +58,11 @@ export const openaiImageAdapter: ProviderAdapter = {
   },
   async streamCall(
     request: RouteRequest,
-    onDelta: (text: string) => void,
+    _onDelta: (text: string) => void,
     accountId: string | null
   ): Promise<ProviderResponse> {
-    const result = await openaiImageAdapter.call(request, accountId);
-    onDelta(result.content);
-    return result;
+    // The multi-MB data URI isn't sent over SSE; the client renders the
+    // stored image from the "done" event (see artifacts/chat-images.ts).
+    return openaiImageAdapter.call(request, accountId);
   },
 };
