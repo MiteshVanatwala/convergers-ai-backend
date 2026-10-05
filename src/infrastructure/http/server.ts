@@ -5,6 +5,7 @@ import { registerHealthRoutes } from "../../modules/health/health.routes";
 import { registerRoutingRoutes } from "../../modules/routing/routing.routes";
 import { registerAdminRoutes } from "../../modules/admin/admin.routes";
 import { registerConversationRoutes } from "../../modules/conversations/conversations.routes";
+import { registerAgentRoutes } from "../../modules/agent/agent.routes";
 import { registerProjectRoutes } from "../../modules/projects/projects.routes";
 import { registerOrgRoutes } from "../../modules/orgs/orgs.routes";
 import { registerSalesRoutes } from "../../modules/sales/sales.routes";
@@ -25,6 +26,7 @@ export async function buildServer() {
   registerAuthRoutes(app);
   registerRoutingRoutes(app);
   registerConversationRoutes(app);
+  registerAgentRoutes(app);
   registerProjectRoutes(app);
   registerOrgRoutes(app);
   registerSalesRoutes(app);

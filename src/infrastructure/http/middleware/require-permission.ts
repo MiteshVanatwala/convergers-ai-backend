@@ -3,13 +3,6 @@ import { AppStatus } from "../../../config/app-status-codes";
 import { fail } from "../../../shared/http/api-response";
 import { getPermissionsForRole } from "../../../modules/admin/admin-auth.service";
 
-declare module "fastify" {
-  interface FastifyRequest {
-    /** Effective permission keys for request.admin.role (loaded by requirePermission). */
-    adminPermissions?: string[];
-  }
-}
-
 /** Pure check — unit-tested; used by middleware and services. */
 export function hasAdminPermission(permissions: readonly string[], required: string): boolean {
   return permissions.includes(required);

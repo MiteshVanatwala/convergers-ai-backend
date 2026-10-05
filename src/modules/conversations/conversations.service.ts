@@ -5,6 +5,7 @@ import { logCaught } from "../../shared/utils/log";
 export type TitleStatus = "pending" | "generated" | "manual";
 export type MessageRole = "user" | "assistant" | "system";
 export type MessageStatus = "complete" | "error" | "cancelled";
+export type ClientType = "web" | "ide" | "mobile" | "api";
 
 export type ConversationRow = {
   id: string;
@@ -14,6 +15,7 @@ export type ConversationRow = {
   title_status: TitleStatus;
   pinned: boolean;
   archived: boolean;
+  client_type: ClientType;
   last_message_at: Date;
   created_at: Date;
 };
@@ -52,7 +54,7 @@ function asNumber(value: string | number | null | undefined): number | null {
 
 const CONVERSATION_COLUMNS = `id::text AS id, account_id::text AS account_id,
        project_id::text AS project_id, title, title_status,
-       pinned, archived, last_message_at, created_at`;
+       pinned, archived, client_type, last_message_at, created_at`;
 
 export function mapConversation(row: ConversationRow) {
   return {
@@ -61,6 +63,7 @@ export function mapConversation(row: ConversationRow) {
     titleStatus: row.title_status,
     pinned: row.pinned,
     archived: row.archived,
+    clientType: row.client_type,
     projectId: row.project_id != null ? String(row.project_id) : null,
     lastMessageAt:
       row.last_message_at instanceof Date
@@ -275,14 +278,15 @@ export async function listMessages(
 
 export async function createConversation(
   accountId: string,
-  title: string
+  title: string,
+  clientType: ClientType = "web"
 ): Promise<ConversationRow> {
   try {
     const result: QueryResult<ConversationRow> = await getPool().query(
-      `INSERT INTO conversations (account_id, title, title_status, last_message_at)
-       VALUES ($1, $2, 'pending', now())
+      `INSERT INTO conversations (account_id, title, title_status, client_type, last_message_at)
+       VALUES ($1, $2, 'pending', $3, now())
        RETURNING ${CONVERSATION_COLUMNS}`,
-      [accountId, title]
+      [accountId, title, clientType]
     );
     return result.rows[0];
   } catch (error: unknown) {
