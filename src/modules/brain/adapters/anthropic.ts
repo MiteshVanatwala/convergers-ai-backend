@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import {
+  estimateOutputTokens,
   outputTokenLimit,
   withSystemNote,
   type ProviderAdapter,
@@ -8,6 +9,7 @@ import {
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import { nativeCost, type TokenUsage } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
+import { estimateInputTokens } from "../router/credits";
 
 // Constructed fresh per call, not cached — cheap (no network I/O), and it
 // means a key set via the admin panel's API Keys page (or a user's own key)
@@ -103,29 +105,47 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
       request: RouteRequest,
       onDelta: (text: string) => void,
       accountId: string | null,
-      onInputTokens?: (tokens: number) => void
+      onInputTokens?: (tokens: number) => void,
+      signal?: AbortSignal
     ): Promise<ProviderResponse> {
       const startedAt = new Date();
       const client = await getClient(id, accountId);
-      const stream = client.messages.stream({
-        model,
-        max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
-        system: withSystemNote(SYSTEM_PROMPT, request),
-        messages: buildMessages(request),
+      const stream = client.messages.stream(
+        {
+          model,
+          max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
+          system: withSystemNote(SYSTEM_PROMPT, request),
+          messages: buildMessages(request),
+        },
+        { signal }
+      );
+      let streamed = "";
+      stream.on("text", (text) => {
+        streamed += text;
+        onDelta(text);
       });
-      stream.on("text", onDelta);
       // message_start carries the exact prompt token count before any
       // output text streams — the one place in this codebase real (not
       // estimated) usage is available ahead of completion.
-      if (onInputTokens) {
-        stream.on("streamEvent", (event) => {
-          if (event.type === "message_start") {
-            onInputTokens(toUsage(event.message.usage).input_tokens);
-          }
-        });
-      }
+      let startUsage: TokenUsage | null = null;
+      stream.on("streamEvent", (event) => {
+        if (event.type === "message_start") {
+          startUsage = toUsage(event.message.usage);
+          onInputTokens?.(startUsage.input_tokens);
+        }
+      });
 
-      const response = await stream.finalMessage();
+      let response: Anthropic.Message;
+      try {
+        response = await stream.finalMessage();
+      } catch (err) {
+        if (!signal?.aborted) throw err;
+        const usage: TokenUsage = {
+          ...(startUsage ?? { input_tokens: estimateInputTokens(request) }),
+          output_tokens: estimateOutputTokens(streamed),
+        };
+        return { content: streamed, usage, native_cost: nativeCost(model, usage, startedAt), stopped: true };
+      }
       const content = response.content
         .filter((block): block is Anthropic.TextBlock => block.type === "text")
         .map((block) => block.text)

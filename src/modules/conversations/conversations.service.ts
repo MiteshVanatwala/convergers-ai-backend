@@ -39,6 +39,11 @@ export function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
+/** messages.id is a bigint identity, sent to clients as a decimal string. */
+export function isMessageId(value: string): boolean {
+  return /^[1-9]\d{0,18}$/.test(value);
+}
+
 export function provisionalTitle(prompt: string, max = 60): string {
   const clean = prompt.replace(/\s+/g, " ").trim();
   if (!clean) return "New chat";
@@ -269,6 +274,70 @@ export async function listMessages(
     return result.rows;
   } catch (error: unknown) {
     logCaught("conversations.service.listMessages", error);
+    throw error;
+  }
+}
+
+/** A user message in this conversation — the start of a turn. Null if it isn't one. */
+const TURN_START = `
+  SELECT id, created_at FROM messages
+  WHERE id = $3::bigint AND conversation_id = $1 AND account_id = $2 AND role = 'user'`;
+
+/**
+ * Deletes one turn: the user message `messageId` and the assistant reply
+ * straight after it. False when `messageId` isn't a user message here.
+ */
+export async function deleteTurn(
+  accountId: string,
+  conversationId: string,
+  messageId: string
+): Promise<boolean> {
+  try {
+    const result = await getPool().query(
+      `WITH target AS (${TURN_START}),
+       reply AS (
+         SELECT m.id, m.role FROM messages m, target t
+         WHERE m.conversation_id = $1 AND m.account_id = $2
+           AND (m.created_at, m.id) > (t.created_at, t.id)
+         ORDER BY m.created_at, m.id
+         LIMIT 1
+       )
+       DELETE FROM messages
+       WHERE conversation_id = $1 AND account_id = $2
+         AND (id IN (SELECT id FROM target)
+              OR id IN (SELECT id FROM reply WHERE role = 'assistant'))
+       RETURNING role`,
+      [conversationId, accountId, messageId]
+    );
+    return result.rows.some((r: { role: string }) => r.role === "user");
+  } catch (error: unknown) {
+    logCaught("conversations.service.deleteTurn", error);
+    throw error;
+  }
+}
+
+/**
+ * Deletes the turn starting at user message `messageId` and every message
+ * after it — what edit and regenerate replace. False when `messageId` isn't
+ * a user message here.
+ */
+export async function deleteFromMessage(
+  accountId: string,
+  conversationId: string,
+  messageId: string
+): Promise<boolean> {
+  try {
+    const result = await getPool().query(
+      `WITH target AS (${TURN_START})
+       DELETE FROM messages m
+       USING target t
+       WHERE m.conversation_id = $1 AND m.account_id = $2
+         AND (m.created_at, m.id) >= (t.created_at, t.id)`,
+      [conversationId, accountId, messageId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  } catch (error: unknown) {
+    logCaught("conversations.service.deleteFromMessage", error);
     throw error;
   }
 }

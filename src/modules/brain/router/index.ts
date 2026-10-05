@@ -24,6 +24,7 @@ import { getPool } from "../../../infrastructure/db/pool";
 import * as usageLog from "../usageLog";
 import * as usageService from "../../usage/usage.service";
 import {
+  RequestStoppedError,
   UserFacingError,
   classifyModelFailure,
   describeProviderFailure,
@@ -316,7 +317,8 @@ async function walkChain(
     explicitPick = false,
     narrowed = false,
     skippedForCost = [],
-  }: { explicitPick?: boolean; narrowed?: boolean; skippedForCost?: string[] } = {}
+    signal,
+  }: { explicitPick?: boolean; narrowed?: boolean; skippedForCost?: string[]; signal?: AbortSignal } = {}
 ): Promise<RouteResponse> {
   let firstError: unknown;
   let lastError: unknown;
@@ -325,6 +327,8 @@ async function walkChain(
   const errors: unknown[] = [];
   let lastIndex = 0;
   for (let i = 0; i < chain.length; i++) {
+    // Stopped before this option was called — nothing was generated or spent.
+    if (signal?.aborted) throw new RequestStoppedError();
     lastIndex = i;
     // Set once the provider is actually called, for the admin model-status board.
     let callStartedAt: number | null = null;
@@ -337,7 +341,8 @@ async function walkChain(
       byok = plan.byok;
       callStartedAt = Date.now();
       const response = await attempt(chain[i], plan.request);
-      recordModelSuccess(chain[i].id, Date.now() - callStartedAt);
+      // A stopped stream says nothing about the model's health either way.
+      if (!response.stopped) recordModelSuccess(chain[i].id, Date.now() - callStartedAt);
       // A billing error after this point isn't the model's fault.
       callStartedAt = null;
       const credits = plan.byok ? BYOK_FEE_CREDITS : creditsForCost(response.native_cost);
@@ -372,6 +377,8 @@ async function walkChain(
         truncatedByCredits: plan.cappedByCredits && response.truncated === true,
       });
     } catch (err) {
+      // The provider failed only because the caller went away — don't blame it or fall back.
+      if (signal?.aborted) throw new RequestStoppedError();
       if (i === 0) {
         firstError = err;
         firstByok = byok;
@@ -530,7 +537,8 @@ export async function routeStream(
   accountId: string,
   onDelta: (text: string) => void,
   onStage?: (event: StageEvent) => void,
-  ctx?: RouteUsageContext
+  ctx?: RouteUsageContext,
+  signal?: AbortSignal
 ): Promise<RouteResponse> {
   const { chain, explicitPick, narrowed, testMode, skippedForCost } = await resolveRouteChain(
     request,
@@ -544,9 +552,15 @@ export async function routeStream(
     accountId,
     taskType,
     (adapter, planned) =>
-      adapter.streamCall(planned, onDelta, accountId, (inputTokens) => {
-        onStage?.({ stage: "generating", provider: adapter.id, inputTokens });
-      }),
+      adapter.streamCall(
+        planned,
+        onDelta,
+        accountId,
+        (inputTokens) => {
+          onStage?.({ stage: "generating", provider: adapter.id, inputTokens });
+        },
+        signal
+      ),
     (adapter, attemptIndex) => {
       onStage?.({
         stage: "route",
@@ -556,6 +570,6 @@ export async function routeStream(
       });
     },
     ctx,
-    { explicitPick, narrowed, skippedForCost }
+    { explicitPick, narrowed, skippedForCost, signal }
   );
 }

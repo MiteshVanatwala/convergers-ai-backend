@@ -21,6 +21,7 @@ export function normalize(
     content: response.content,
     fallback_used: opts.fallbackUsed,
     ...(response.truncated ? { truncated: true } : {}),
+    ...(response.stopped ? { stopped: true } : {}),
     ...(opts.truncatedByCredits ? { truncated_by_credits: true } : {}),
     ...(opts.usageEventId ? { usage_event_id: opts.usageEventId } : {}),
   };

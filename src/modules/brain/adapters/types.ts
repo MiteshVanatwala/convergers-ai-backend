@@ -57,6 +57,17 @@ export interface ProviderResponse {
   native_cost: number;
   /** Stopped at the output-token limit (Anthropic "max_tokens", OpenAI-style "length"). */
   truncated?: boolean;
+  /** The caller aborted mid-stream — `content` is what arrived before that, and `usage` is estimated. */
+  stopped?: boolean;
+}
+
+/**
+ * Output tokens for a stream cut short by the caller. Providers only report
+ * usage when a stream completes, so a stopped one is billed on this estimate
+ * (~4 chars/token, the usual English average).
+ */
+export function estimateOutputTokens(text: string): number {
+  return Math.ceil(text.length / 4);
 }
 
 /** One adapter per provider — this is the only shape the router depends on. */
@@ -89,11 +100,15 @@ export interface ProviderAdapter {
    * exact prompt token count — only Anthropic's stream exposes this ahead of
    * completion (its `message_start` event); adapters that can't know this
    * early just never call it.
+   * When `signal` aborts, a text adapter cancels the provider call and
+   * resolves with what it has so far, marked `stopped` (never rejects for it).
+   * Adapters with nothing to stream (images) may ignore it.
    */
   streamCall(
     request: RouteRequest,
     onDelta: (text: string) => void,
     accountId: string | null,
-    onInputTokens?: (tokens: number) => void
+    onInputTokens?: (tokens: number) => void,
+    signal?: AbortSignal
   ): Promise<ProviderResponse>;
 }

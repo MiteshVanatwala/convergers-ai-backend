@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import {
+  estimateOutputTokens,
   outputTokenLimit,
   withSystemNote,
   type ProviderAdapter,
@@ -8,6 +9,7 @@ import {
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import { nativeCost, type TokenUsage } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
+import { estimateInputTokens } from "../router/credits";
 
 // Some open-weight models default to an agentic/tool-calling persona and
 // will hallucinate <tool_call> syntax for tools that don't exist — this
@@ -94,30 +96,42 @@ export function createOpenAICompatibleAdapter(config: {
     async streamCall(
       request: RouteRequest,
       onDelta: (text: string) => void,
-      accountId: string | null
+      accountId: string | null,
+      _onInputTokens?: (tokens: number) => void,
+      signal?: AbortSignal
     ): Promise<ProviderResponse> {
       const startedAt = new Date();
       const client = await getClient(accountId);
-      const stream = await client.chat.completions.create({
-        model,
-        messages: buildMessages(request),
-        max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
-        stream: true,
-        stream_options: { include_usage: true },
-      });
 
       let content = "";
       let usage: TokenUsage = { input_tokens: 0, output_tokens: 0 };
       let truncated = false;
 
-      for await (const chunk of stream) {
-        if (chunk.choices[0]?.finish_reason === "length") truncated = true;
-        const delta = chunk.choices[0]?.delta?.content ?? "";
-        if (delta) {
-          content += delta;
-          onDelta(delta);
+      try {
+        const stream = await client.chat.completions.create(
+          {
+            model,
+            messages: buildMessages(request),
+            max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
+            stream: true,
+            stream_options: { include_usage: true },
+          },
+          { signal }
+        );
+        for await (const chunk of stream) {
+          if (chunk.choices[0]?.finish_reason === "length") truncated = true;
+          const delta = chunk.choices[0]?.delta?.content ?? "";
+          if (delta) {
+            content += delta;
+            onDelta(delta);
+          }
+          if (chunk.usage) usage = toUsage(chunk.usage);
         }
-        if (chunk.usage) usage = toUsage(chunk.usage);
+      } catch (err) {
+        if (!signal?.aborted) throw err;
+        // Usage only arrives in the final chunk, which a stopped stream never gets.
+        usage = { input_tokens: estimateInputTokens(request), output_tokens: estimateOutputTokens(content) };
+        return { content, usage, native_cost: nativeCost(model, usage, startedAt), stopped: true };
       }
 
       return { content, usage, native_cost: nativeCost(model, usage, startedAt), truncated };

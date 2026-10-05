@@ -27,6 +27,11 @@ export function registerConversationRoutes(app: FastifyInstance): void {
     conversationsController.archiveConversation(request, reply)
   );
 
+  app.delete<{ Params: { id: string; messageId: string } }>(
+    "/v1/conversations/:id/messages/:messageId",
+    (request, reply) => conversationsController.deleteMessage(request, reply)
+  );
+
   app.post<{ Body: ChatStreamRequest }>("/v1/chat/stream", (request, reply) =>
     conversationsController.chatStream(request, reply)
   );

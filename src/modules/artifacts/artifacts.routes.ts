@@ -24,6 +24,9 @@ export function registerArtifactRoutes(app: FastifyInstance): void {
     artifactsController.remove(request, reply)
   );
 
+  app.get<{ Querystring: { limit?: string; offset?: string } }>("/v1/images", (request, reply) =>
+    artifactsController.listMyImages(request, reply)
+  );
   app.get<{ Params: { id: string }; Querystring: { download?: string } }>("/v1/files/:id", (request, reply) =>
     artifactsController.getFileContent(request, reply)
   );

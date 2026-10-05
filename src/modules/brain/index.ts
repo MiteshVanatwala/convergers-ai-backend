@@ -15,7 +15,7 @@ import { INSUFFICIENT_CREDITS_CODE, UserFacingError } from "./router/errors";
 
 export type { StageEvent, RouteUsageContext };
 export { isSensitiveFilterEnabled };
-export { userFacingPayload, INSUFFICIENT_CREDITS_CODE } from "./router/errors";
+export { userFacingPayload, INSUFFICIENT_CREDITS_CODE, RequestStoppedError } from "./router/errors";
 
 // Every charge is at least 1 credit (see ledger creditsForCost).
 const MIN_CREDITS_TO_START = 1;
@@ -57,7 +57,11 @@ function sanitize(request: RouteRequest): RouteRequest {
 }
 
 /** Internal options for the chat entry point (never settable by the request body). */
-export type ChatOptions = { artifacts?: boolean };
+export type ChatOptions = {
+  artifacts?: boolean;
+  /** Aborting stops the model mid-answer; the partial answer comes back marked `stopped`. */
+  signal?: AbortSignal;
+};
 
 /** Adds what was masked to the usage context, so the usage event records it (counts only). */
 function withRedaction(
@@ -126,7 +130,7 @@ export async function handleStreamRequest(
   if (!(await isSensitiveFilterEnabled(accountId))) {
     const { taskType, method } = await classifyRequest(request);
     onStage?.({ stage: "classify", taskType, method });
-    return routeStream(request, taskType, accountId, onDelta, onStage, ctx);
+    return routeStream(request, taskType, accountId, onDelta, onStage, ctx, options.signal);
   }
 
   onStage?.({ stage: "redact" });
@@ -146,7 +150,8 @@ export async function handleStreamRequest(
     accountId,
     () => {},
     onStage,
-    withRedaction(ctx, redaction.typeCounts)
+    withRedaction(ctx, redaction.typeCounts),
+    options.signal
   );
   const restored = restoreSensitiveData(result.content, redaction.map);
   onDelta(restored);

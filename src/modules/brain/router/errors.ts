@@ -18,6 +18,14 @@ export class UserFacingError extends Error {
 
 export const INSUFFICIENT_CREDITS_CODE = "insufficient_credits";
 
+/** The caller aborted before any model produced output — nothing to save or bill. */
+export class RequestStoppedError extends Error {
+  constructor() {
+    super("Request stopped by the caller");
+    this.name = "RequestStoppedError";
+  }
+}
+
 export const GENERIC_FAILURE_MESSAGE =
   "Something went wrong while generating a response. Please try again.";
 

@@ -8,7 +8,7 @@ import { getMembership } from "../orgs/orgs.service";
 import { referenceSafe } from "./artifact-parser";
 import * as artifactsService from "./artifacts.service";
 import { VISIBILITIES, type ArtifactRow, type Visibility } from "./artifacts.service";
-import { getFile } from "./files.service";
+import { getFile, listImagesForAccount } from "./files.service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_PAGE = 60;
@@ -63,6 +63,32 @@ export async function listMine(
   } catch (error: unknown) {
     logCaught("artifacts.controller.listMine", error);
     return fail(reply, AppStatus.ARTIFACT_FAILED, "Failed to load artifacts", 500);
+  }
+}
+
+/** GET /v1/images — images the signed-in user generated in chat, for the library. */
+export async function listMyImages(
+  request: FastifyRequest<{ Querystring: { limit?: string; offset?: string } }>,
+  reply: FastifyReply
+) {
+  const account = await requireSession(request, reply);
+  if (!account) return;
+  try {
+    const { limit, offset } = page(request.query);
+    const rows = await listImagesForAccount(account.id, limit, offset);
+    return ok(reply, AppStatus.IMAGES_RETRIEVED, {
+      items: rows.map((r) => ({
+        id: r.id,
+        url: `/v1/files/${r.id}`,
+        contentType: r.content_type,
+        conversationId: r.conversation_id,
+        conversationTitle: r.conversation_title,
+        createdAt: r.created_at.toISOString(),
+      })),
+    });
+  } catch (error: unknown) {
+    logCaught("artifacts.controller.listMyImages", error);
+    return fail(reply, AppStatus.FILE_FAILED, "Failed to load images", 500);
   }
 }
 

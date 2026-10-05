@@ -90,3 +90,35 @@ export async function findAccountFileByKey(accountId: string, key: string): Prom
     throw error;
   }
 }
+
+/** An image generated in chat, with the conversation it came from (for the library). */
+export type AccountImageRow = {
+  id: string;
+  content_type: string;
+  conversation_id: string | null;
+  conversation_title: string | null;
+  created_at: Date;
+};
+
+/** The account's generated images, newest first. */
+export async function listImagesForAccount(
+  accountId: string,
+  limit: number,
+  offset: number
+): Promise<AccountImageRow[]> {
+  try {
+    const result: QueryResult<AccountImageRow> = await getPool().query(
+      `SELECT f.id::text AS id, f.content_type, f.conversation_id::text AS conversation_id,
+              c.title AS conversation_title, f.created_at
+       FROM stored_files f LEFT JOIN conversations c ON c.id = f.conversation_id
+       WHERE f.account_id = $1 AND f.kind = 'image'
+       ORDER BY f.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [accountId, limit, offset]
+    );
+    return result.rows;
+  } catch (error: unknown) {
+    logCaught("artifacts.files.service.listImagesForAccount", error);
+    throw error;
+  }
+}

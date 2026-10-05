@@ -9,6 +9,7 @@ import {
   assertHasCredits,
   handleStreamRequest,
   isSensitiveFilterEnabled,
+  RequestStoppedError,
   userFacingPayload,
 } from "../brain";
 import * as usageService from "../usage/usage.service";
@@ -202,6 +203,27 @@ export async function archiveConversation(
   }
 }
 
+/** DELETE /v1/conversations/:id/messages/:messageId — removes one turn (prompt + answer). */
+export async function deleteMessage(
+  request: FastifyRequest<{ Params: IdParams & { messageId: string } }>,
+  reply: FastifyReply
+) {
+  const account = await requireSession(request, reply);
+  if (!account) return;
+  const { id, messageId } = request.params;
+  if (!conversationsService.isUuid(id) || !conversationsService.isMessageId(messageId)) {
+    return fail(reply, AppStatus.MESSAGE_NOT_FOUND, "Message not found", 404);
+  }
+  try {
+    const deleted = await conversationsService.deleteTurn(account.id, id, messageId);
+    if (!deleted) return fail(reply, AppStatus.MESSAGE_NOT_FOUND, "Message not found", 404);
+    return ok(reply, AppStatus.MESSAGE_DELETED, { id: messageId });
+  } catch (error: unknown) {
+    logCaught("conversations.controller.deleteMessage", error);
+    return fail(reply, AppStatus.MESSAGE_DELETE_FAILED, "Failed to delete message", 500);
+  }
+}
+
 function writeSseHeaders(request: FastifyRequest, reply: FastifyReply) {
   const corsHeaders = reply.getHeaders();
   reply.hijack();
@@ -245,12 +267,28 @@ export async function chatStream(
   if (requestedId && !conversationsService.isUuid(requestedId)) {
     return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid conversationId", 400);
   }
+  const replaceFrom =
+    typeof body.replaceFromMessageId === "string" ? body.replaceFromMessageId.trim() : null;
+  if (replaceFrom && (!requestedId || !conversationsService.isMessageId(replaceFrom))) {
+    return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid replaceFromMessageId", 400);
+  }
 
   const res = writeSseHeaders(request, reply);
   const send = (event: string, data: unknown) => {
     if (res.destroyed) return;
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
+
+  // The client's Stop button aborts its fetch, which closes the connection —
+  // stop the model too, so it isn't billed for an answer nobody will read.
+  const stop = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) stop.abort();
+  });
+
+  // Set once the prompt is saved and until its answer is — a failure in
+  // between is saved as an error answer, so history doesn't show a bare prompt.
+  let unanswered: { conversationId: string } | null = null;
 
   try {
     // Check before creating the conversation / storing the prompt, so an
@@ -278,6 +316,19 @@ export async function chatStream(
 
     send("conversation", { id: conversation.id });
 
+    // Edit / regenerate: the old turn (and anything after it) gives way to this one.
+    if (replaceFrom) {
+      const replaced = await conversationsService.deleteFromMessage(
+        account.id,
+        conversation.id,
+        replaceFrom
+      );
+      if (!replaced) {
+        send("error", { message: "That message no longer exists. Reload the chat and try again." });
+        return;
+      }
+    }
+
     // Fetch prior turns BEFORE inserting the current message — otherwise
     // it would show up as a duplicate trailing "history" entry alongside
     // being passed separately as `input`.
@@ -289,17 +340,25 @@ export async function chatStream(
     const history = await expandHistoryArtifacts(
       account.id,
       priorMessages
-        .filter((m) => m.status === "complete" && (m.role === "user" || m.role === "assistant"))
+        // A stopped answer stays in context, so "continue" picks up where it left off.
+        .filter(
+          (m) =>
+            (m.status === "complete" || (m.status === "cancelled" && m.content.trim() !== "")) &&
+            (m.role === "user" || m.role === "assistant")
+        )
         .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }))
     );
 
-    await conversationsService.insertMessage({
+    const userMessage = await conversationsService.insertMessage({
       conversationId: conversation.id,
       accountId: account.id,
       role: "user",
       content: input,
       status: "complete",
     });
+    // Lets the client edit, regenerate or delete this turn later.
+    send("turn", { userMessageId: userMessage.id });
+    unanswered = { conversationId: conversation.id };
 
     const routeBody = {
       input,
@@ -309,14 +368,29 @@ export async function chatStream(
       ...(history.length > 0 ? { history } : {}),
     };
 
-    const rawResult: RouteResponse = await handleStreamRequest(
-      routeBody,
-      account.id,
-      (text) => send("delta", { text }),
-      (event) => send("stage", event),
-      { conversationId: conversation.id },
-      { artifacts: true }
-    );
+    let rawResult: RouteResponse;
+    try {
+      rawResult = await handleStreamRequest(
+        routeBody,
+        account.id,
+        (text) => send("delta", { text }),
+        (event) => send("stage", event),
+        { conversationId: conversation.id },
+        { artifacts: true, signal: stop.signal }
+      );
+    } catch (err) {
+      if (!(err instanceof RequestStoppedError)) throw err;
+      unanswered = null;
+      // Stopped before any model answered — keep the turn so history shows it as stopped.
+      await conversationsService.insertMessage({
+        conversationId: conversation.id,
+        accountId: account.id,
+        role: "assistant",
+        content: "",
+        status: "cancelled",
+      });
+      return;
+    }
 
     // Generated images and artifacts go to object storage and are swapped
     // for links/references before the answer is saved.
@@ -341,8 +415,9 @@ export async function chatStream(
       tokensInput: result.usage.input_tokens,
       tokensOutput: result.usage.output_tokens,
       creditsCharged: result.credits_charged,
-      status: "complete",
+      status: result.stopped ? "cancelled" : "complete",
     });
+    unanswered = null;
 
     if (result.usage_event_id) {
       try {
@@ -381,7 +456,19 @@ export async function chatStream(
     send("done", { ...result, conversationId: conversation.id });
   } catch (err) {
     request.log.error(err);
-    send("error", userFacingPayload(err));
+    const payload = userFacingPayload(err);
+    send("error", payload);
+    if (unanswered) {
+      await conversationsService
+        .insertMessage({
+          conversationId: unanswered.conversationId,
+          accountId: account.id,
+          role: "assistant",
+          content: payload.message,
+          status: "error",
+        })
+        .catch((saveErr: unknown) => logCaught("conversations.controller.chatStream.saveError", saveErr));
+    }
   } finally {
     res.end();
   }
