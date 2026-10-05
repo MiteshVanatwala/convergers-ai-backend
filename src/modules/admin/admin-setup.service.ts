@@ -121,6 +121,12 @@ const MIGRATION_PROBES: { file: string; purpose: string; sql: string }[] = [
     purpose: "Voice input and read-aloud models",
     sql: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'groq:whisper-large-v3-turbo') AS applied`,
   },
+  {
+    file: "test_mode_v1.sql",
+    purpose: "Test mode (cheapest models) for chosen accounts",
+    sql: `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'accounts' AND column_name = 'test_mode') AS applied`,
+  },
 ];
 
 const PARTITIONED_TABLES = ["credit_ledger", "usage_events", "messages"];

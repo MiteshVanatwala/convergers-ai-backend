@@ -29,15 +29,22 @@ const IMAGE_GEN_SIGNS = /\b(generate|create|draw|paint|make|design|produce|rende
 // "draw a cat" / "sketch a castle" (but not "draw a flowchart", an artifact).
 const IMAGE_DESCRIPTION = /^\s*(?:(?:an?\s+)?(?:image|picture|photo|illustration|painting|drawing|sketch|watercolou?r|portrait)\s+of\b|(?:please\s+)?(?:draw|paint|sketch|illustrate)\b(?!.{0,30}\b(?:diagram|flow ?chart|chart|graph|mind ?map|org chart|table|svg)\b))/i;
 
-// After an image answer: "now make the sky orange", "add a hat", "try again"
-// — a short instruction that edits the image rather than starting a new topic.
-const IMAGE_EDIT_SIGNS = /^\s*(?:(?:now|ok(?:ay)?|great|nice|cool|good|and|also|please|can you|could you|pls)[\s,!.]+)*(?:make|change|turn|add|remove|erase|replace|put|give|use|recolou?r|colou?r|zoom|crop|extend|try|redo|regenerate|another|again|same|without|with|more|less|but|swap|move|edit)\b/i;
+// After an image answer: "now make the sky orange", "add a hat", "try again
+// but brighter" — an edit of that image, not a new topic. Needs an edit verb
+// up front AND either something visual to point at ("it", "the background",
+// "colours") or a very short instruction ("add a red hat"). Plain follow-up
+// questions ("can you give me a greeting message") stay with the text models.
+const IMAGE_EDIT_START = /^\s*(?:(?:now|ok(?:ay)?|great|nice|cool|good|and|also|please|pls|can you|could you)[\s,!.]+)*(?:make|change|turn|add|remove|erase|replace|put|recolou?r|colou?r|zoom|crop|extend|redo|regenerate|swap|move|edit|try again|do it again|another one|give it|use (?:a|an|the|more|less)|without|darker|brighter|bigger|smaller)\b/i;
+const IMAGE_EDIT_TARGET = /\b(?:it|this|that|image|picture|photo|gif|animation|logo|icon|background|colou?rs?|text|font|letters?|words?|sky|style|version|frames?|border|size|lighting|shadow|glow|speed)\b/i;
 const GENERATED_IMAGE = /!\[[^\]]*\]\(\/v1\/files\/[0-9a-f-]{36}\)/;
 
 /** True when the latest assistant answer is a generated image and this input reads like an edit of it. */
 function isImageFollowUp(request: RouteRequest): boolean {
   const last = [...(request.history ?? [])].reverse().find((turn) => turn.role === "assistant");
-  return Boolean(last && GENERATED_IMAGE.test(last.content) && request.input.length <= 400 && IMAGE_EDIT_SIGNS.test(request.input));
+  if (!last || !GENERATED_IMAGE.test(last.content) || request.input.length > 400) return false;
+  if (!IMAGE_EDIT_START.test(request.input)) return false;
+  const words = request.input.trim().split(/\s+/).length;
+  return IMAGE_EDIT_TARGET.test(request.input) || words <= 4;
 }
 
 // "build a landing page", "make an interactive dashboard", "create an SVG

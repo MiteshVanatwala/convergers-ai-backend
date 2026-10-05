@@ -72,6 +72,12 @@ export interface ProviderAdapter {
    */
   canHandle?(request: RouteRequest): boolean;
   /**
+   * Typical USD for one request, when `cost` alone misleads — e.g. Claude
+   * images bill per token but run many sandbox steps. Used to rank models
+   * cheapest-first in test mode.
+   */
+  typicalUsd?: number;
+  /**
    * `accountId` drives per-account key resolution (own key vs. master key,
    * tier-gated — see accountKeyResolver.ts). `null` is for internal calls
    * not attributed to any end user, which always use the master key.

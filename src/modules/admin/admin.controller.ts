@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { forgetTestMode } from "../brain/router/testMode";
 import { AppStatus } from "../../config/app-status-codes";
 import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
@@ -52,6 +53,7 @@ function mapUserDetail(row: usersService.AdminUserDetailRow) {
     signupGrantAmount:
       row.signup_grant_amount == null ? null : Number(row.signup_grant_amount),
     signupGrantAt: toIso(row.signup_grant_at),
+    testMode: row.test_mode,
   };
 }
 
@@ -151,7 +153,7 @@ export async function getUser(
 export async function updateUser(
   request: FastifyRequest<{
     Params: { id: string };
-    Body: { name?: string | null; status?: string };
+    Body: { name?: string | null; status?: string; testMode?: unknown };
   }>,
   reply: FastifyReply
 ) {
@@ -178,6 +180,11 @@ export async function updateUser(
       return fail(reply, AppStatus.ADMIN_USERS_VALIDATION_FAILED, "name is required", 400);
     }
 
+    const testModeRaw = request.body?.testMode;
+    if (testModeRaw !== undefined && typeof testModeRaw !== "boolean") {
+      return fail(reply, AppStatus.ADMIN_USERS_VALIDATION_FAILED, "testMode must be true or false", 400);
+    }
+
     const existing = await usersService.getUserById(id);
     if (!existing) {
       return fail(reply, AppStatus.ADMIN_USER_NOT_FOUND, "User not found", 404);
@@ -191,7 +198,8 @@ export async function updateUser(
       );
     }
 
-    const updated = await usersService.updateUser(id, { name, status: statusRaw });
+    const updated = await usersService.updateUser(id, { name, status: statusRaw, testMode: testModeRaw });
+    forgetTestMode(id);
     if (!updated) {
       return fail(reply, AppStatus.ADMIN_USER_NOT_FOUND, "User not found", 404);
     }

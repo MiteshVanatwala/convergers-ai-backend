@@ -23,9 +23,16 @@ import { creditsForCost } from "../../ledger/ledger.service";
 import { getPool } from "../../../infrastructure/db/pool";
 import * as usageLog from "../usageLog";
 import * as usageService from "../../usage/usage.service";
-import { UserFacingError, classifyModelFailure, describeProviderFailure, isCapacityError } from "./errors";
+import {
+  UserFacingError,
+  classifyModelFailure,
+  describeProviderFailure,
+  isCapacityError,
+  isServerSideSetupError,
+} from "./errors";
 import { recordModelFailure, recordModelSuccess } from "../modelHealth";
 import { recordModelCallFailure } from "../callFailures";
+import { TEST_MODE_MAX_USD, cheapestFirst, isTestModeAccount, typicalRequestUsd } from "./testMode";
 import { BYOK_FEE_CREDITS, planAttempt } from "./credits";
 import { getOrgPolicyForAccount } from "../../orgs/orgs.service";
 
@@ -104,6 +111,11 @@ type RoutingRow = { task_type: string; provider_id: string };
 type RegistryRow = { id: string; label: string | null; visible_to_users: boolean };
 
 /** Rebuilds the in-memory hierarchy + visible-model set. Call at boot and after any admin write (routing rules or visibility). */
+/** The task type's configured chain, in admin order (read-only snapshot). */
+export function currentChain(taskType: TaskType): readonly ProviderAdapter[] {
+  return hierarchy[taskType];
+}
+
 export async function reloadHierarchy(): Promise<void> {
   const pool = getPool();
   const [routingResult, registryResult]: [QueryResult<RoutingRow>, QueryResult<RegistryRow>] =
@@ -146,7 +158,7 @@ export type StageEvent =
   | { stage: "classify"; taskType: TaskType; method: ClassificationMethod }
   | { stage: "redact" }
   /** `pick`: the user's explicit model choice, or chosen automatically for the task type. */
-  | { stage: "route"; provider: string; attempt: number; pick: "explicit" | "auto" }
+  | { stage: "route"; provider: string; attempt: number; pick: "explicit" | "auto" | "test" }
   | { stage: "generating"; provider: string; inputTokens: number };
 
 /** Optional chat context so usage_events can store conversation_id. */
@@ -218,12 +230,25 @@ async function resolveExplicitProvider(
   return [adapter, ...hierarchy[taskType].filter((a) => a.id !== adapter.id)];
 }
 
+/**
+ * `narrowed`: some models were skipped because they can't do this request
+ * (e.g. a GIF on a still-image model), so failures should say so.
+ */
+type RouteChain = {
+  chain: ProviderAdapter[];
+  explicitPick: boolean;
+  narrowed: boolean;
+  testMode: boolean;
+  /** Test mode left these out for cost (labels), so a failure can say so. */
+  skippedForCost: string[];
+};
+
 async function resolveRouteChain(
   request: RouteRequest,
   taskType: TaskType,
   accountId: string,
   ctx?: RouteUsageContext
-): Promise<{ chain: ProviderAdapter[]; explicitPick: boolean }> {
+): Promise<RouteChain> {
   const policy = await getOrgPolicyForAccount(accountId);
   const allowed = policy?.allowedModelIds ? new Set(policy.allowedModelIds) : null;
 
@@ -238,15 +263,26 @@ async function resolveRouteChain(
     return {
       chain: allowed ? chain.filter((a) => allowed.has(a.id)) : chain,
       explicitPick: true,
+      narrowed: false,
+      testMode: false,
+      skippedForCost: [],
     };
   }
 
-  const fullChain = await resolveChain(taskType, accountId, ctx);
+  // Test mode: cheapest model first, for accounts an admin flagged for testing.
+  const testMode = await isTestModeAccount(accountId);
+  const ranked = await resolveChain(taskType, accountId, ctx);
+  const fullChain = testMode ? cheapestFirst(ranked) : ranked;
   // Skip models that can't do this particular request (e.g. animation on a
   // still-image model) — unless none can, then let the chain try anyway.
   const capable = fullChain.filter((a) => !a.canHandle || a.canHandle(request));
-  const chain = capable.length > 0 ? capable : fullChain;
-  if (!allowed) return { chain, explicitPick: false };
+  const usable = capable.length > 0 ? capable : fullChain;
+  const narrowed = capable.length > 0 && capable.length < fullChain.length;
+  // Test mode also leaves out pricey models, unless they're all that can do it (e.g. GIFs).
+  const affordable = testMode ? usable.filter((a) => typicalRequestUsd(a) <= TEST_MODE_MAX_USD) : usable;
+  const chain = affordable.length > 0 ? affordable : usable;
+  const skippedForCost = usable.filter((a) => !chain.includes(a)).map((a) => labelFor(a.id));
+  if (!allowed) return { chain, explicitPick: false, narrowed, testMode, skippedForCost };
 
   // Org admins restricted the models — only route among the allowed ones.
   const permitted = chain.filter((a) => allowed.has(a.id));
@@ -257,7 +293,7 @@ async function resolveRouteChain(
         `Ask an admin to allow more models.`
     );
   }
-  return { chain: permitted, explicitPick: false };
+  return { chain: permitted, explicitPick: false, narrowed, testMode, skippedForCost };
 }
 
 /**
@@ -276,10 +312,17 @@ async function walkChain(
   attempt: (adapter: ProviderAdapter, request: RouteRequest) => Promise<ProviderResponse>,
   onAttempt?: (adapter: ProviderAdapter, attemptIndex: number) => void | Promise<void>,
   ctx?: RouteUsageContext,
-  explicitPick = false
+  {
+    explicitPick = false,
+    narrowed = false,
+    skippedForCost = [],
+  }: { explicitPick?: boolean; narrowed?: boolean; skippedForCost?: string[] } = {}
 ): Promise<RouteResponse> {
   let firstError: unknown;
   let lastError: unknown;
+  let firstByok = false;
+  let lastByok = false;
+  const errors: unknown[] = [];
   let lastIndex = 0;
   for (let i = 0; i < chain.length; i++) {
     lastIndex = i;
@@ -329,8 +372,13 @@ async function walkChain(
         truncatedByCredits: plan.cappedByCredits && response.truncated === true,
       });
     } catch (err) {
-      if (i === 0) firstError = err;
+      if (i === 0) {
+        firstError = err;
+        firstByok = byok;
+      }
       lastError = err;
+      lastByok = byok;
+      errors.push(err);
       // Only failures of the provider call itself, on our key — a user's own (BYOK)
       // key being rejected says nothing about the model's health.
       if (callStartedAt != null && !byok) {
@@ -357,37 +405,95 @@ async function walkChain(
     }
   }
   await persistError(accountId, taskType, chain[lastIndex]?.id ?? "unconfigured", ctx);
-  throw chainFailure(chain, explicitPick, lastIndex, firstError, lastError);
+  throw chainFailure(chain, lastIndex, {
+    explicitPick,
+    narrowed,
+    skippedForCost,
+    taskType,
+    firstError,
+    firstByok,
+    lastError,
+    lastByok,
+    errors,
+  });
 }
 
 /** The one user-safe error to surface once every option in the chain has failed. */
 function chainFailure(
   chain: ProviderAdapter[],
-  explicitPick: boolean,
   lastIndex: number,
-  firstError: unknown,
-  lastError: unknown
+  f: {
+    explicitPick: boolean;
+    narrowed: boolean;
+    skippedForCost: string[];
+    taskType: TaskType;
+    firstError: unknown;
+    firstByok: boolean;
+    lastError: unknown;
+    lastByok: boolean;
+    errors: unknown[];
+  }
 ): UserFacingError {
   const first = chain[0];
-  if (!first) return describeProviderFailure(lastError, "The model");
+  if (!first) return describeProviderFailure(f.lastError, "The model");
 
-  if (explicitPick) {
+  if (f.explicitPick) {
     const label = labelFor(first.id);
     if (lastIndex > 0) {
       return new UserFacingError(
         `${label} is at its usage limit right now, and no other model could take over. ` +
           `Please try again in a minute.`,
-        { cause: lastError }
+        { cause: f.lastError }
       );
     }
-    return describeProviderFailure(firstError, label);
+    return describeProviderFailure(f.firstError, label, f.firstByok);
   }
 
-  if (lastError instanceof UserFacingError) return lastError;
-  if (chain.length === 1) return describeProviderFailure(lastError, labelFor(first.id));
+  const failure = chainFailureMessage(chain, lastIndex, f);
+  if (f.skippedForCost.length === 0) return failure;
   return new UserFacingError(
-    "None of the available models could answer right now. Please try again shortly.",
-    { cause: lastError }
+    `${failure.message} (Test mode skipped ${f.skippedForCost.join(", ")} to save cost — pick it from the model menu to use it.)`,
+    { cause: f.lastError, code: failure.code }
+  );
+}
+
+/** Auto-routing failure message (chainFailure adds the test-mode note). */
+function chainFailureMessage(
+  chain: ProviderAdapter[],
+  lastIndex: number,
+  f: Parameters<typeof chainFailure>[2]
+): UserFacingError {
+  // Only some models can do this (e.g. GIFs) and they all failed — say why
+  // nothing else was tried.
+  const onlyOption = f.narrowed
+    ? ` ${chain.length === 1 ? "It's the only model here" : "These are the only models here"} that can make ` +
+      `GIFs and animations, so please try again later.`
+    : "";
+
+  if (chain.length === 1) {
+    const label = labelFor(chain[lastIndex]!.id);
+    if (f.narrowed && !f.lastByok && isServerSideSetupError(f.lastError)) {
+      return new UserFacingError(
+        `${label} is unavailable right now because of a problem on our side — nothing to do with your request.${onlyOption}`,
+        { cause: f.lastError }
+      );
+    }
+    return describeProviderFailure(f.lastError, label, f.lastByok);
+  }
+  if (f.lastError instanceof UserFacingError) return f.lastError;
+
+  // Every option was down on our side (no credit, blocked, bad or missing key) — not the request.
+  if (f.errors.length > 0 && f.errors.every(isServerSideSetupError)) {
+    const what = f.taskType === "image" ? "Image generation" : "This kind of request";
+    return new UserFacingError(
+      `${what} is unavailable right now: every model that can handle it is offline on our side ` +
+        `(provider account or setup issue). This isn't caused by your request — please try again later.${onlyOption}`,
+      { cause: f.lastError }
+    );
+  }
+  return new UserFacingError(
+    `None of the available models could answer right now. Please try again shortly.${onlyOption}`,
+    { cause: f.lastError }
   );
 }
 
@@ -397,7 +503,7 @@ export async function route(
   accountId: string,
   ctx?: RouteUsageContext
 ): Promise<RouteResponse> {
-  const { chain, explicitPick } = await resolveRouteChain(request, taskType, accountId, ctx);
+  const { chain, explicitPick, narrowed, skippedForCost } = await resolveRouteChain(request, taskType, accountId, ctx);
   return walkChain(
     chain,
     request,
@@ -406,7 +512,7 @@ export async function route(
     (adapter, planned) => adapter.call(planned, accountId),
     undefined,
     ctx,
-    explicitPick
+    { explicitPick, narrowed, skippedForCost }
   );
 }
 
@@ -426,7 +532,12 @@ export async function routeStream(
   onStage?: (event: StageEvent) => void,
   ctx?: RouteUsageContext
 ): Promise<RouteResponse> {
-  const { chain, explicitPick } = await resolveRouteChain(request, taskType, accountId, ctx);
+  const { chain, explicitPick, narrowed, testMode, skippedForCost } = await resolveRouteChain(
+    request,
+    taskType,
+    accountId,
+    ctx
+  );
   return walkChain(
     chain,
     request,
@@ -441,10 +552,10 @@ export async function routeStream(
         stage: "route",
         provider: adapter.id,
         attempt: attemptIndex,
-        pick: explicitPick ? "explicit" : "auto",
+        pick: explicitPick ? "explicit" : testMode ? "test" : "auto",
       });
     },
     ctx,
-    explicitPick
+    { explicitPick, narrowed, skippedForCost }
   );
 }

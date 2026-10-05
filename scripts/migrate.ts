@@ -119,6 +119,7 @@ const MIGRATIONS: Migration[] = [
     file: "images_v2.sql",
     detect: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'anthropic:claude-sonnet-5-5-image') AS applied`,
   },
+  { file: "test_mode_v1.sql", detect: column("accounts", "test_mode") },
 ];
 
 const DB_DIR = join(__dirname, "..", "db");

@@ -35,6 +35,7 @@ export type AdminUserDetailRow = AdminUserRow & {
   updated_at: Date;
   signup_grant_amount: string | number | null;
   signup_grant_at: Date | null;
+  test_mode: boolean;
 };
 
 export type AdminUserListResult = {
@@ -47,6 +48,8 @@ export type AdminUserListResult = {
 export type AdminUserUpdateInput = {
   name: string | null;
   status: "active" | "suspended";
+  /** Omitted leaves it unchanged. */
+  testMode?: boolean;
 };
 
 const SORT_COLUMNS: Record<AdminUserListSort, string> = {
@@ -67,6 +70,7 @@ const DETAIL_SELECT = `
     a.email_verified_at,
     a.risk_score,
     a.updated_at,
+    a.test_mode,
     COALESCE(w.balance, 0) AS credit_balance,
     a.last_login_at,
     a.created_at,
@@ -165,11 +169,12 @@ export async function updateUser(
       `UPDATE accounts
        SET name = $2,
            status = $3,
+           test_mode = COALESCE($4, test_mode),
            updated_at = now()
        WHERE id = $1
          AND status <> 'soft_deleted'
        RETURNING id`,
-      [accountId, input.name, input.status]
+      [accountId, input.name, input.status, input.testMode ?? null]
     );
     if ((updateResult.rowCount ?? 0) === 0) {
       return null;

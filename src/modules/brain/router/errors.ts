@@ -41,6 +41,41 @@ function providerStatus(err: unknown): number | undefined {
   return undefined;
 }
 
+/** Message plus any structured body the SDK attached — where providers put the real reason. */
+function errorText(err: unknown): string {
+  if (!(err instanceof Error)) return String(err ?? "");
+  const body = (err as { error?: unknown }).error;
+  return `${err.message} ${body ? JSON.stringify(body) : ""}`;
+}
+
+/**
+ * The provider account behind the key can't serve requests at all — out of
+ * credit, quota used up, project blocked, model terms not accepted. Nothing
+ * the user can fix by rephrasing; usually ours to fix (or theirs, on BYOK).
+ */
+export function isProviderAccountError(err: unknown): boolean {
+  if (err instanceof UserFacingError) return false;
+  if (providerStatus(err) === 402) return true;
+  return /credit balance is too low|insufficient[_ ]quota|exceeded your current quota|billing|payment required|denied access|requires terms acceptance|model_terms_required|account (?:is |has been )?(?:suspended|disabled|deactivated)/i.test(
+    errorText(err)
+  );
+}
+
+/** No key for this provider on the server (master key missing). */
+export function isNotConfiguredError(err: unknown): boolean {
+  return err instanceof Error && !(err instanceof UserFacingError) && /isn't configured/.test(err.message);
+}
+
+/**
+ * A failure that's ours to fix (account, key or setup), not the request's or
+ * a passing outage: provider account problems, a missing key, a rejected key.
+ */
+export function isServerSideSetupError(err: unknown): boolean {
+  if (err instanceof UserFacingError) return false;
+  const status = providerStatus(err);
+  return isProviderAccountError(err) || isNotConfiguredError(err) || status === 401 || status === 403;
+}
+
 function isConnectionError(err: unknown): boolean {
   return err instanceof Error && /connection|timeout|ECONNRESET|ENOTFOUND|fetch failed/i.test(`${err.name} ${err.message}`);
 }
@@ -58,22 +93,35 @@ export function isCapacityError(err: unknown): boolean {
  */
 export function classifyModelFailure(
   err: unknown
-): { kind: "rate_limited" | "auth" | "error"; status: number | null } | null {
+): { kind: "rate_limited" | "auth" | "account" | "error"; status: number | null } | null {
   if (err instanceof UserFacingError) return null;
-  if (err instanceof Error && /isn't configured/.test(err.message)) return null;
+  if (isNotConfiguredError(err)) return null;
   const status = providerStatus(err) ?? null;
+  if (isProviderAccountError(err)) return { kind: "account", status };
   if (status === 429 || status === 529) return { kind: "rate_limited", status };
   if (status === 401 || status === 403) return { kind: "auth", status };
   return { kind: "error", status };
 }
 
-/** Friendly explanation of why `label` failed. Passes UserFacingErrors through unchanged. */
-export function describeProviderFailure(err: unknown, label: string): UserFacingError {
+/**
+ * Friendly explanation of why `label` failed. Passes UserFacingErrors through
+ * unchanged. `byok`: the call ran on the user's own key, so account problems
+ * are theirs to fix rather than ours.
+ */
+export function describeProviderFailure(err: unknown, label: string, byok = false): UserFacingError {
   if (err instanceof UserFacingError) return err;
 
   const status = providerStatus(err);
   let message: string;
-  if (status === 429 || status === 529) {
+  if (isProviderAccountError(err)) {
+    message = byok
+      ? `${label} couldn't run on your own API key: that provider account is out of credit or blocked. ` +
+        `Check its balance, or remove the key in Settings → API Keys to use ours.`
+      : `${label} is unavailable right now because of a problem with our account at its provider — ` +
+        `nothing to do with your request. Try another model, or try again later.`;
+  } else if (isNotConfiguredError(err)) {
+    message = `${label} isn't set up on this server yet. Pick another model, or use Auto.`;
+  } else if (status === 429 || status === 529) {
     message = `${label} is at its usage limit right now. Try again in a minute, or switch to Auto.`;
   } else if (status === 401 || status === 403) {
     message =

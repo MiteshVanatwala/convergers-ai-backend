@@ -4,6 +4,7 @@ import type { ProviderAdapter, ProviderResponse } from "./types";
 import { nativeCost, type TokenUsage } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
 import { previousImage } from "./imageRequest";
+import { UserFacingError } from "../router/errors";
 
 /**
  * Claude draws with code: it writes a Python script (Pillow, matplotlib,
@@ -72,6 +73,8 @@ export const claudeImageAdapter: ProviderAdapter = {
   id: ID,
   keyProviderId: "anthropic",
   cost: { kind: "tokens", model: MODEL, maxOutputTokens: MAX_OUTPUT_TOKENS },
+  // Several sandbox steps, each re-reading the conversation: ~$0.05–0.50 a run.
+  typicalUsd: 0.3,
   async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
     const startedAt = new Date();
     const client = await getClient(accountId);
@@ -125,7 +128,9 @@ export const claudeImageAdapter: ProviderAdapter = {
           messages.push({ role: "assistant", content: response.content });
         }
         if (!response) throw new Error("Claude returned no response");
-        if (response.stop_reason === "refusal") throw new Error("Claude declined this image request");
+        if (response.stop_reason === "refusal") {
+          throw new UserFacingError("Claude declined to make this image. Try describing it differently.");
+        }
         return response;
       };
 
@@ -161,8 +166,11 @@ export const claudeImageAdapter: ProviderAdapter = {
       }
       if (!image) {
         const blocks = response.content.map((b) => b.type).join(",");
-        throw new Error(
-          `Claude didn't produce an image file (stop=${response.stop_reason}; files=[${seen.join("; ")}]; blocks=${blocks})`
+        console.warn(
+          `[claudeImage] no image file (stop=${response.stop_reason}; files=[${seen.join("; ")}]; blocks=${blocks})`
+        );
+        throw new UserFacingError(
+          "Claude worked on the image but didn't finish a file this time. Please try again — a simpler description often helps."
         );
       }
 

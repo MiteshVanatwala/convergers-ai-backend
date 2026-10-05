@@ -8,7 +8,7 @@
  * lives in usage_events.
  */
 
-export type FailureKind = "rate_limited" | "auth" | "error";
+export type FailureKind = "rate_limited" | "auth" | "account" | "error";
 
 type Attempt = { at: number; ok: boolean; latencyMs: number; kind?: FailureKind };
 

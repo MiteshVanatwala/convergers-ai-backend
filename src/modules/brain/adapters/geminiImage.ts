@@ -2,6 +2,7 @@ import type { RouteRequest } from "@convergers-ai/shared-types";
 import type { ProviderAdapter, ProviderResponse } from "./types";
 import { resolveKeyForAccount } from "./accountKeyResolver";
 import { previousImage, wantsAnimation } from "./imageRequest";
+import { UserFacingError } from "../router/errors";
 
 /**
  * Gemini's native image models ("Nano Banana") via the generateContent REST
@@ -109,6 +110,11 @@ function createGeminiImageAdapter(config: {
       const images = parts.filter((p) => p.inlineData?.data && !p.thought);
       if (images.length === 0) {
         const reason = json.promptFeedback?.blockReason ?? json.candidates?.[0]?.finishReason;
+        if (reason && /SAFETY|PROHIBITED|BLOCKLIST|IMAGE_SAFETY|RECITATION/i.test(reason)) {
+          throw new UserFacingError(
+            "The image model declined this prompt under its content rules. Try rewording it, or describe the scene differently."
+          );
+        }
         throw new Error(`Gemini returned no image${reason ? ` (${reason})` : ""}`);
       }
       const caption = parts

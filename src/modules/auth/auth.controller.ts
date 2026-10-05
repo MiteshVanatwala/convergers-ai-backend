@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { isTestModeAccount } from "../brain/router/testMode";
 import { AppStatus } from "../../config/app-status-codes";
 import { primaryWebOrigin } from "../../config/env";
 import { fail, ok } from "../../shared/http/api-response";
@@ -169,10 +170,11 @@ async function mapMe(account: {
   impersonated_by?: string | null;
   impersonator_label?: string | null;
 }) {
-  const [membership, personalization, orgPolicy] = await Promise.all([
+  const [membership, personalization, orgPolicy, testMode] = await Promise.all([
     plansService.getOrEnsureActivePlan(account.id),
     authService.getPersonalizationSettings(account.id),
     getOrgPolicyForAccount(account.id),
+    isTestModeAccount(account.id),
   ]);
   // Drives which Organization view the client shows (and whether it shows one).
   const orgStatus: "none" | "invited" | "setting_up" | "active" = orgPolicy
@@ -192,6 +194,8 @@ async function mapMe(account: {
     plan: plansService.mapAuthPlan(membership),
     defaultModelId: personalization.defaultModelId,
     filterSensitiveData: personalization.filterSensitiveData,
+    /** Auto picks the cheapest model (set by an admin for testing accounts). */
+    testMode,
     org: orgPolicy
       ? {
           id: orgPolicy.orgId,

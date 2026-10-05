@@ -457,9 +457,10 @@ export async function getDashboardSnapshot(range: DashboardRange): Promise<Dashb
   }
 }
 
-const FAILURE_TEXT: Record<"rate_limited" | "auth" | "error", string> = {
+const FAILURE_TEXT: Record<"rate_limited" | "auth" | "account" | "error", string> = {
   rate_limited: "rate limited",
   auth: "API key rejected",
+  account: "provider account out of credit or blocked",
   error: "request failed",
 };
 
@@ -475,6 +476,9 @@ function deriveModelStatus(input: {
   const last = h.lastFailure
     ? `${FAILURE_TEXT[h.lastFailure.kind]}${h.lastFailure.status ? ` (HTTP ${h.lastFailure.status})` : ""}`
     : "";
+  if (h.lastAttemptFailed && h.lastFailure?.kind === "account") {
+    return { status: "down", reason: `Last call: ${last}. Top up or unblock the account at the provider.` };
+  }
   if (h.lastAttemptFailed && h.lastFailure?.kind === "auth") {
     return { status: "down", reason: `Last call: ${last}. Check the key and the provider account.` };
   }
