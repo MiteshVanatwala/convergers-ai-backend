@@ -10,6 +10,7 @@ import type { RouteRequest } from "@convergers-ai/shared-types";
 import { nativeCost, type TokenUsage } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
 import { estimateInputTokens } from "../router/credits";
+import { anthropicEffort, requestEffort } from "./reasoning";
 
 // Constructed fresh per call, not cached — cheap (no network I/O), and it
 // means a key set via the admin panel's API Keys page (or a user's own key)
@@ -72,7 +73,20 @@ function toUsage(u: Anthropic.Usage): TokenUsage {
   };
 }
 
-export function createAnthropicAdapter(id: string, model: string): ProviderAdapter {
+/**
+ * `output_config.effort` from the classifier's effort — only for models that
+ * accept it (`supportsEffort`); the rest get no field and run at their default.
+ */
+function effortConfig(request: RouteRequest, supportsEffort: boolean): { output_config?: Anthropic.OutputConfig } {
+  const effort = supportsEffort ? anthropicEffort(requestEffort(request)) : undefined;
+  return effort ? { output_config: { effort } } : {};
+}
+
+export function createAnthropicAdapter(
+  id: string,
+  model: string,
+  { supportsEffort = false }: { supportsEffort?: boolean } = {}
+): ProviderAdapter {
   return {
     id,
     keyProviderId: "anthropic",
@@ -85,6 +99,7 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
         max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
         system: withSystemNote(SYSTEM_PROMPT, request),
         messages: buildMessages(request),
+        ...effortConfig(request, supportsEffort),
       });
 
       const content = response.content
@@ -116,6 +131,7 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
           max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
           system: withSystemNote(SYSTEM_PROMPT, request),
           messages: buildMessages(request),
+          ...effortConfig(request, supportsEffort),
         },
         { signal }
       );
@@ -167,7 +183,11 @@ export function createAnthropicAdapter(id: string, model: string): ProviderAdapt
 export const haikuAdapter = createAnthropicAdapter("anthropic:claude-haiku-4-5", "claude-haiku-4-5");
 // Stronger tier — code and research, and the fallback for text if Haiku fails.
 // Sonnet 5.5 replaced Sonnet 5 (same price) — db/models_2026_10.sql.
-export const sonnetAdapter = createAnthropicAdapter("anthropic:claude-sonnet-5-5", "claude-sonnet-5-5");
+export const sonnetAdapter = createAnthropicAdapter("anthropic:claude-sonnet-5-5", "claude-sonnet-5-5", {
+  supportsEffort: true,
+});
 // Top tier — frontier-class agentic coding and reasoning. Opus 5.5 replaced
 // Opus 5 and is cheaper ($4/$20 vs $5/$25 per MTok).
-export const opusAdapter = createAnthropicAdapter("anthropic:claude-opus-5-5", "claude-opus-5-5");
+export const opusAdapter = createAnthropicAdapter("anthropic:claude-opus-5-5", "claude-opus-5-5", {
+  supportsEffort: true,
+});

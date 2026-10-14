@@ -243,11 +243,14 @@ export async function routeStream(
   };
 
   try {
-    const result = await handleStreamRequest(
+    // The raw routing API stays one model, no web search (that's a chat feature).
+    const { usageEventIds: _ids, ...result } = await handleStreamRequest(
       request.body,
       account.id,
       (text) => send("delta", { text }),
-      (event) => send("stage", event)
+      (event) => send("stage", event),
+      undefined,
+      { webSearch: "off" }
     );
     send("done", result);
   } catch (err) {

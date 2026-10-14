@@ -64,12 +64,34 @@ const CASES: Case[] = [
   { expected: "research", request: { input: "Analyse the market for cloud kitchens in Bangalore" } },
   { expected: "research", request: { input: "Summarise recent studies on intermittent fasting" } },
 
+  // math
+  { expected: "math", request: { input: "Solve 2x + 3 = 11" } },
+  { expected: "math", request: { input: "What is the integral of x^2 sin(x)?" } },
+  { expected: "math", request: { input: "Prove that the square root of 2 is irrational" } },
+  { expected: "math", request: { input: "Find the eigenvalues of [[2,1],[1,2]]" } },
+  { expected: "math", request: { input: "If I roll two dice, what's the probability of getting a sum of 7?" } },
+  { expected: "math", request: { input: "A train leaves at 60 km/h and another at 80 km/h an hour later — when does the second catch up?" } },
+
+  // reasoning
+  { expected: "reasoning", request: { input: "Here's a riddle: what has keys but can't open locks?" } },
+  { expected: "reasoning", request: { input: "Three boxes are all mislabelled — apples, oranges, mixed. You may pick one fruit from one box. How do you fix the labels?" } },
+  { expected: "reasoning", request: { input: "If all bloops are razzies and some razzies are lazzies, are some bloops definitely lazzies?" } },
+
+  // writing
+  { expected: "writing", request: { input: "Write a short poem about monsoon" } },
+  { expected: "writing", request: { input: "Draft an email to my landlord asking to fix the leaking tap" } },
+  { expected: "writing", request: { input: "Write a cover letter for a Python developer role", note: "not code" } },
+  { expected: "writing", request: { input: "Can you write a toast for my sister's wedding?" } },
+  { expected: "writing", request: { input: "Rewrite this email to sound more polite: send me the files now" } },
+
+  // translation
+  { expected: "translation", request: { input: "Translate 'good morning' to Hindi" } },
+  { expected: "translation", request: { input: "Please translate this paragraph into Tamil: We will reach by 6 pm." } },
+  { expected: "code", request: { input: "Translate this Python function to Go", note: "programming language, not translation" } },
+
   // text
   { expected: "text", request: { input: "Explain photosynthesis simply" } },
-  { expected: "text", request: { input: "Rewrite this email to sound more polite: send me the files now" } },
-  { expected: "text", request: { input: "Translate 'good morning' to Hindi" } },
   { expected: "text", request: { input: "What's the capital of Australia?" } },
-  { expected: "text", request: { input: "Write a short poem about monsoon" } },
   { expected: "text", request: { input: "What's on the TV program tonight?", note: "'program' is not code" } },
   { expected: "text", request: { input: "Tips for a good morning routine" } },
   { expected: "text", request: { input: "Thanks, that helped!" } },

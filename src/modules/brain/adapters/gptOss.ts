@@ -1,4 +1,5 @@
 import { createOpenAICompatibleAdapter } from "./openaiCompatible";
+import { gptOssReasoning } from "./reasoning";
 
 // OpenAI's own open-weight models (Apache 2.0), served via Groq — same key
 // as the Qwen adapter (../qwen.ts). https://console.groq.com/docs/models
@@ -8,6 +9,7 @@ export const gptOssAdapter = createOpenAICompatibleAdapter({
   baseURL: "https://api.groq.com/openai/v1",
   providerKeyId: "groq",
   providerLabel: "Groq",
+  reasoning: gptOssReasoning,
 });
 
 // Smallest/cheapest tier ($0.075/$0.30 per MTok) — quick everyday text.
@@ -17,4 +19,5 @@ export const gptOss20bAdapter = createOpenAICompatibleAdapter({
   baseURL: "https://api.groq.com/openai/v1",
   providerKeyId: "groq",
   providerLabel: "Groq",
+  reasoning: gptOssReasoning,
 });

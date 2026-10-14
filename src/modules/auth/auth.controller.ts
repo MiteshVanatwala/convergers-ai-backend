@@ -194,6 +194,7 @@ async function mapMe(account: {
     plan: plansService.mapAuthPlan(membership),
     defaultModelId: personalization.defaultModelId,
     filterSensitiveData: personalization.filterSensitiveData,
+    customInstructions: personalization.customInstructions,
     /** Auto picks the cheapest model (set by an admin for testing accounts). */
     testMode,
     org: orgPolicy
@@ -214,7 +215,12 @@ async function mapMe(account: {
 
 export async function updateMe(
   request: FastifyRequest<{
-    Body: { name?: string | null; defaultModelId?: string | null; filterSensitiveData?: boolean };
+    Body: {
+      name?: string | null;
+      defaultModelId?: string | null;
+      filterSensitiveData?: boolean;
+      customInstructions?: string | null;
+    };
   }>,
   reply: FastifyReply
 ) {
@@ -233,11 +239,12 @@ export async function updateMe(
     const hasName = "name" in body;
     const hasDefaultModel = "defaultModelId" in body;
     const hasFilterSensitiveData = "filterSensitiveData" in body;
-    if (!hasName && !hasDefaultModel && !hasFilterSensitiveData) {
+    const hasCustomInstructions = "customInstructions" in body;
+    if (!hasName && !hasDefaultModel && !hasFilterSensitiveData && !hasCustomInstructions) {
       return fail(
         reply,
         AppStatus.AUTH_PROFILE_VALIDATION_FAILED,
-        "name, defaultModelId, or filterSensitiveData is required",
+        "name, defaultModelId, filterSensitiveData, or customInstructions is required",
         400
       );
     }
@@ -271,8 +278,12 @@ export async function updateMe(
       updatedAccount = updated;
     }
 
-    if (hasDefaultModel || hasFilterSensitiveData) {
-      const personalizationInput: { defaultModelId?: string | null; filterSensitiveData?: boolean } = {};
+    if (hasDefaultModel || hasFilterSensitiveData || hasCustomInstructions) {
+      const personalizationInput: {
+        defaultModelId?: string | null;
+        filterSensitiveData?: boolean;
+        customInstructions?: string | null;
+      } = {};
 
       if (hasDefaultModel) {
         const raw = body.defaultModelId;
@@ -297,6 +308,28 @@ export async function updateMe(
           );
         }
         personalizationInput.filterSensitiveData = body.filterSensitiveData;
+      }
+
+      if (hasCustomInstructions) {
+        const raw = body.customInstructions;
+        if (raw !== null && typeof raw !== "string") {
+          return fail(
+            reply,
+            AppStatus.AUTH_PROFILE_VALIDATION_FAILED,
+            "customInstructions must be a string or null",
+            400
+          );
+        }
+        const trimmed = raw?.trim() ?? "";
+        if (trimmed.length > authService.CUSTOM_INSTRUCTIONS_MAX_LEN) {
+          return fail(
+            reply,
+            AppStatus.AUTH_PROFILE_VALIDATION_FAILED,
+            `customInstructions must be at most ${authService.CUSTOM_INSTRUCTIONS_MAX_LEN} characters`,
+            400
+          );
+        }
+        personalizationInput.customInstructions = trimmed || null;
       }
 
       const result = await authService.updatePersonalizationSettings(account.id, personalizationInput);

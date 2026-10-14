@@ -329,7 +329,11 @@ export async function updateProfileName(
 export type PersonalizationSettings = {
   defaultModelId: string | null;
   filterSensitiveData: boolean;
+  customInstructions: string | null;
 };
+
+/** Long enough for a paragraph about yourself and how you like answers; it rides on every request. */
+export const CUSTOM_INSTRUCTIONS_MAX_LEN = 1500;
 
 export async function getPersonalizationSettings(accountId: string): Promise<PersonalizationSettings> {
   try {
@@ -337,8 +341,9 @@ export async function getPersonalizationSettings(accountId: string): Promise<Per
     const result: QueryResult<{
       default_provider_override: string | null;
       filter_sensitive_data: boolean;
+      custom_instructions: string | null;
     }> = await pool.query(
-      `SELECT default_provider_override, filter_sensitive_data
+      `SELECT default_provider_override, filter_sensitive_data, custom_instructions
        FROM personalization_settings WHERE account_id = $1`,
       [accountId]
     );
@@ -346,6 +351,7 @@ export async function getPersonalizationSettings(accountId: string): Promise<Per
     return {
       defaultModelId: row?.default_provider_override ?? null,
       filterSensitiveData: row?.filter_sensitive_data ?? false,
+      customInstructions: row?.custom_instructions ?? null,
     };
   } catch (error: unknown) {
     logCaught("auth.service.getPersonalizationSettings", error);
@@ -356,7 +362,7 @@ export async function getPersonalizationSettings(accountId: string): Promise<Per
 /** Read-modify-write: only the provided fields change, everything else keeps its current value. */
 export async function updatePersonalizationSettings(
   accountId: string,
-  input: { defaultModelId?: string | null; filterSensitiveData?: boolean }
+  input: { defaultModelId?: string | null; filterSensitiveData?: boolean; customInstructions?: string | null }
 ): Promise<"ok" | "invalid_model"> {
   try {
     const pool = getPool();
@@ -374,14 +380,17 @@ export async function updatePersonalizationSettings(
       input.defaultModelId !== undefined ? input.defaultModelId : current.defaultModelId;
     const nextFilterSensitiveData =
       input.filterSensitiveData !== undefined ? input.filterSensitiveData : current.filterSensitiveData;
+    const nextCustomInstructions =
+      input.customInstructions !== undefined ? input.customInstructions : current.customInstructions;
 
     await pool.query(
-      `INSERT INTO personalization_settings (account_id, default_provider_override, filter_sensitive_data)
-       VALUES ($1, $2, $3)
+      `INSERT INTO personalization_settings (account_id, default_provider_override, filter_sensitive_data, custom_instructions)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (account_id) DO UPDATE SET
          default_provider_override = EXCLUDED.default_provider_override,
-         filter_sensitive_data = EXCLUDED.filter_sensitive_data`,
-      [accountId, nextDefaultModelId, nextFilterSensitiveData]
+         filter_sensitive_data = EXCLUDED.filter_sensitive_data,
+         custom_instructions = EXCLUDED.custom_instructions`,
+      [accountId, nextDefaultModelId, nextFilterSensitiveData, nextCustomInstructions]
     );
     return "ok";
   } catch (error: unknown) {

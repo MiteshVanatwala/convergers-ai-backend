@@ -1,5 +1,6 @@
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import type { TokenUsage } from "./pricing";
+import type { Effort } from "../classifier";
 
 /**
  * What adapters actually receive: the public RouteRequest plus Brain-internal
@@ -8,10 +9,13 @@ import type { TokenUsage } from "./pricing";
  * - `systemNote` is appended to the adapter's system prompt.
  * - `maxOutputTokens` lowers the adapter's output cap — the router sets it to
  *   what the account's credit balance can pay for (router/credits.ts).
+ * - `effort` is how hard to think, from the classifier; adapters map it onto
+ *   their provider's reasoning control (reasoning.ts). Omitted = provider default.
  */
 export type BrainRequest = RouteRequest & {
   systemNote?: string;
   maxOutputTokens?: number;
+  effort?: Effort;
   /** Chat only: let the model put standalone deliverables in <artifact> blocks (see ARTIFACT_GUIDE). */
   enableArtifacts?: boolean;
 };

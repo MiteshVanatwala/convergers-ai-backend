@@ -1,4 +1,5 @@
 import { createOpenAICompatibleAdapter } from "./openaiCompatible";
+import { qwenReasoning } from "./reasoning";
 
 // Alibaba Cloud's own DashScope signup isn't reachable from every region
 // (India included, as of writing) — Qwen is served via Groq's
@@ -9,4 +10,5 @@ export const qwenAdapter = createOpenAICompatibleAdapter({
   baseURL: "https://api.groq.com/openai/v1",
   providerKeyId: "groq",
   providerLabel: "Groq",
+  reasoning: qwenReasoning,
 });

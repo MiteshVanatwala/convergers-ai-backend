@@ -1,4 +1,5 @@
 import { createOpenAICompatibleAdapter } from "./openaiCompatible";
+import { geminiReasoning } from "./reasoning";
 
 // Google's OpenAI-compatible endpoint for Gemini — https://ai.google.dev/gemini-api/docs/openai
 export const geminiFlashAdapter = createOpenAICompatibleAdapter({
@@ -7,6 +8,7 @@ export const geminiFlashAdapter = createOpenAICompatibleAdapter({
   baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
   providerKeyId: "gemini",
   providerLabel: "Google Gemini",
+  reasoning: geminiReasoning,
 });
 
 // Frontier tier — stronger reasoning, larger context.
@@ -16,6 +18,7 @@ export const geminiProAdapter = createOpenAICompatibleAdapter({
   baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
   providerKeyId: "gemini",
   providerLabel: "Google Gemini",
+  reasoning: geminiReasoning,
 });
 
 // Budget tier — cheapest current Gemini text model.
@@ -25,4 +28,5 @@ export const geminiFlashLiteAdapter = createOpenAICompatibleAdapter({
   baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
   providerKeyId: "gemini",
   providerLabel: "Google Gemini",
+  reasoning: geminiReasoning,
 });

@@ -120,6 +120,11 @@ const MIGRATIONS: Migration[] = [
     detect: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'anthropic:claude-sonnet-5-5-image') AS applied`,
   },
   { file: "test_mode_v1.sql", detect: column("accounts", "test_mode") },
+  {
+    file: "routing_domains_v1.sql",
+    detect: `SELECT EXISTS (SELECT 1 FROM provider_routing_rules WHERE task_type = 'math') AS applied`,
+  },
+  { file: "multi_model_v1.sql", detect: table("answer_votes") },
 ];
 
 const DB_DIR = join(__dirname, "..", "db");

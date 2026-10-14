@@ -3,7 +3,7 @@ import type { RouteRequest } from "@convergers-ai/shared-types";
 import type { ProviderAdapter, ProviderResponse } from "./types";
 import { nativeCost, type TokenUsage } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
-import { previousImage } from "./imageRequest";
+import { previousImage, wantsAnimation, wantsDrawnGraphic } from "./imageRequest";
 import { UserFacingError } from "../router/errors";
 
 /**
@@ -75,6 +75,9 @@ export const claudeImageAdapter: ProviderAdapter = {
   cost: { kind: "tokens", model: MODEL, maxOutputTokens: MAX_OUTPUT_TOKENS },
   // Several sandbox steps, each re-reading the conversation: ~$0.05–0.50 a run.
   typicalUsd: 0.3,
+  // Several times the cost of a Gemini / OpenAI image, and it can't paint —
+  // Auto only uses it for animation and flat/text graphics. An explicit pick still works.
+  canHandle: (request) => wantsAnimation(request.input) || wantsDrawnGraphic(request.input),
   async call(request: RouteRequest, accountId: string | null): Promise<ProviderResponse> {
     const startedAt = new Date();
     const client = await getClient(accountId);

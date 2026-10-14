@@ -10,6 +10,7 @@ import type { RouteRequest } from "@convergers-ai/shared-types";
 import { nativeCost, type TokenUsage } from "./pricing";
 import { resolveKeyForAccount } from "./accountKeyResolver";
 import { estimateInputTokens } from "../router/credits";
+import { requestEffort, type OpenAIReasoningParams, type ReasoningControl } from "./reasoning";
 
 // Some open-weight models default to an agentic/tool-calling persona and
 // will hallucinate <tool_call> syntax for tools that don't exist — this
@@ -42,9 +43,13 @@ function toUsage(u: OpenAI.CompletionUsage | undefined | null): TokenUsage {
   const extra = u as OpenAI.CompletionUsage & { prompt_cache_hit_tokens?: number; cached_tokens?: number };
   const cached = u.prompt_tokens_details?.cached_tokens ?? extra.prompt_cache_hit_tokens ?? extra.cached_tokens ?? 0;
   const input = u.prompt_tokens ?? 0;
+  // Reasoning tokens are billed as output. Most providers count them in
+  // completion_tokens; one that reports them only in total_tokens would
+  // otherwise be under-billed, so take whichever is larger.
+  const output = Math.max(u.completion_tokens ?? 0, (u.total_tokens ?? 0) - input);
   return {
     input_tokens: input,
-    output_tokens: u.completion_tokens ?? 0,
+    output_tokens: output,
     cached_input_tokens: Math.min(Math.max(0, cached), input),
   };
 }
@@ -62,8 +67,15 @@ export function createOpenAICompatibleAdapter(config: {
   baseURL: string;
   providerKeyId: string;
   providerLabel: string;
+  /** The provider's reasoning control (reasoning.ts); omitted = always the model's default. */
+  reasoning?: ReasoningControl;
 }): ProviderAdapter {
-  const { id, model, baseURL, providerKeyId, providerLabel } = config;
+  const { id, model, baseURL, providerKeyId, providerLabel, reasoning } = config;
+
+  function reasoningParams(request: RouteRequest): OpenAIReasoningParams {
+    const effort = requestEffort(request);
+    return reasoning && effort ? reasoning(effort) : {};
+  }
 
   async function getClient(accountId: string | null): Promise<OpenAI> {
     const apiKey = await resolveKeyForAccount(id, providerKeyId, providerLabel, accountId);
@@ -81,6 +93,7 @@ export function createOpenAICompatibleAdapter(config: {
         model,
         messages: buildMessages(request),
         max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
+        ...reasoningParams(request),
       });
 
       const content = response.choices[0]?.message?.content ?? "";
@@ -113,6 +126,7 @@ export function createOpenAICompatibleAdapter(config: {
             model,
             messages: buildMessages(request),
             max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
+            ...reasoningParams(request),
             stream: true,
             stream_options: { include_usage: true },
           },

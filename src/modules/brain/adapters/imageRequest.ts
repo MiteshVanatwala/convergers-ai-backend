@@ -14,6 +14,16 @@ export function wantsAnimation(prompt: string): boolean {
   return ANIMATION.test(prompt);
 }
 
+// Flat, text-heavy or geometric graphics — what drawing with code does well
+// (claudeImage.ts). Photos and painterly scenes are left to the image models.
+const DRAWN_GRAPHIC =
+  /\b(?:logo|logotype|wordmark|monogram|icon|badge|sticker|emoji|typography|lettering|text that says|with the (?:text|words)|quote card|banner|poster|flyer|infographic|chart|graph|diagram|flow ?chart|pattern|geometric|pixel art|ascii|qr|meme)\b/i;
+
+/** "a logo with the words…", "a geometric pattern", "an infographic" — drawn better with code than painted. */
+export function wantsDrawnGraphic(prompt: string): boolean {
+  return DRAWN_GRAPHIC.test(prompt);
+}
+
 /** The latest image this account generated earlier in the conversation, if any. */
 export async function previousImage(
   request: RouteRequest,

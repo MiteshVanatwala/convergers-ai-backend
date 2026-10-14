@@ -1,5 +1,7 @@
 import type { QueryResult } from "pg";
+import type { AnswerMetadata } from "@convergers-ai/shared-types";
 import { getPool } from "../../infrastructure/db/pool";
+import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
 import { logCaught } from "../../shared/utils/log";
 
 export type TitleStatus = "pending" | "generated" | "manual";
@@ -31,6 +33,7 @@ export type MessageRow = {
   credits_charged: string | number | null;
   status: MessageStatus;
   created_at: Date;
+  metadata: AnswerMetadata | null;
 };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -58,6 +61,10 @@ function asNumber(value: string | number | null | undefined): number | null {
 const CONVERSATION_COLUMNS = `id::text AS id, account_id::text AS account_id,
        project_id::text AS project_id, title, title_status,
        pinned, archived, last_message_at, created_at`;
+
+const MESSAGE_COLUMNS = `id::text AS id, conversation_id::text AS conversation_id,
+       account_id::text AS account_id, role, content, provider, task_type,
+       tokens_input, tokens_output, credits_charged, status, created_at, metadata`;
 
 export function mapConversation(row: ConversationRow) {
   return {
@@ -90,6 +97,7 @@ export function mapMessage(row: MessageRow) {
     creditsCharged: asNumber(row.credits_charged),
     status: row.status,
     createdAt: row.created_at.toISOString(),
+    ...(row.metadata ? { metadata: row.metadata } : {}),
   };
 }
 
@@ -262,9 +270,7 @@ export async function listMessages(
     if (!conversation) return [];
 
     const result: QueryResult<MessageRow> = await getPool().query(
-      `SELECT id::text AS id, conversation_id::text AS conversation_id,
-              account_id::text AS account_id, role, content, provider, task_type,
-              tokens_input, tokens_output, credits_charged, status, created_at
+      `SELECT ${MESSAGE_COLUMNS}
        FROM messages
        WHERE conversation_id = $1 AND account_id = $2
        ORDER BY created_at ASC, id ASC
@@ -383,16 +389,15 @@ export async function insertMessage(input: {
   tokensOutput?: number | null;
   creditsCharged?: number | null;
   status?: MessageStatus;
+  metadata?: AnswerMetadata | null;
 }): Promise<MessageRow> {
   try {
     const result: QueryResult<MessageRow> = await getPool().query(
       `INSERT INTO messages (
          conversation_id, account_id, role, content,
-         provider, task_type, tokens_input, tokens_output, credits_charged, status
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING id::text AS id, conversation_id::text AS conversation_id,
-                 account_id::text AS account_id, role, content, provider, task_type,
-                 tokens_input, tokens_output, credits_charged, status, created_at`,
+         provider, task_type, tokens_input, tokens_output, credits_charged, status, metadata
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING ${MESSAGE_COLUMNS}`,
       [
         input.conversationId,
         input.accountId,
@@ -404,6 +409,7 @@ export async function insertMessage(input: {
         input.tokensOutput ?? null,
         input.creditsCharged ?? null,
         input.status ?? "complete",
+        input.metadata ? JSON.stringify(input.metadata) : null,
       ]
     );
     await touchConversation(input.conversationId);
@@ -495,6 +501,98 @@ export async function setGeneratedTitle(
     return result.rows[0] ?? null;
   } catch (error: unknown) {
     logCaught("conversations.service.setGeneratedTitle", error);
+    throw error;
+  }
+}
+
+/** One assistant message of this account's conversation, with the prompt it answered. */
+export async function getAnswerWithPrompt(
+  accountId: string,
+  conversationId: string,
+  messageId: string
+): Promise<{ answer: MessageRow; prompt: MessageRow | null; history: MessageRow[] } | null> {
+  try {
+    const result: QueryResult<MessageRow> = await getPool().query(
+      `SELECT ${MESSAGE_COLUMNS}
+       FROM messages
+       WHERE conversation_id = $1 AND account_id = $2
+       ORDER BY created_at ASC, id ASC`,
+      [conversationId, accountId]
+    );
+    const index = result.rows.findIndex((m) => m.id === messageId);
+    const answer = result.rows[index];
+    if (!answer || answer.role !== "assistant") return null;
+    const before = result.rows.slice(0, index);
+    const prompt = before.length > 0 && before[before.length - 1]!.role === "user" ? before[before.length - 1]! : null;
+    return { answer, prompt, history: prompt ? before.slice(0, -1) : before };
+  } catch (error: unknown) {
+    logCaught("conversations.service.getAnswerWithPrompt", error);
+    throw error;
+  }
+}
+
+/** Merges `patch` into an assistant message's metadata (shallow, top-level keys). */
+export async function mergeMessageMetadata(
+  accountId: string,
+  messageId: string,
+  patch: AnswerMetadata
+): Promise<void> {
+  try {
+    await getPool().query(
+      `UPDATE messages
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+       WHERE id = $2::bigint AND account_id = $1 AND role = 'assistant'`,
+      [accountId, messageId, JSON.stringify(patch)]
+    );
+  } catch (error: unknown) {
+    logCaught("conversations.service.mergeMessageMetadata", error);
+    throw error;
+  }
+}
+
+/**
+ * Compare: makes candidate `chosen` the message's answer (what later turns
+ * see as context) and records the vote — one per answer, the latest wins.
+ */
+export async function chooseCandidate(input: {
+  accountId: string;
+  conversationId: string;
+  message: MessageRow;
+  chosen: number;
+}): Promise<MessageRow | null> {
+  const candidates = input.message.metadata?.candidates ?? [];
+  const pick = candidates[input.chosen];
+  if (!pick || pick.failed) return null;
+  try {
+    return await withPoolTransaction(async (client) => {
+      const updated: QueryResult<MessageRow> = await client.query(
+        `UPDATE messages
+         SET content = $3, provider = $4,
+             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('chosen', $5::int)
+         WHERE id = $2::bigint AND account_id = $1 AND role = 'assistant'
+         RETURNING ${MESSAGE_COLUMNS}`,
+        [input.accountId, input.message.id, pick.content, pick.provider, input.chosen]
+      );
+      await client.query(
+        `INSERT INTO answer_votes (account_id, conversation_id, message_id, task_type, winner_provider, loser_providers)
+         VALUES ($1, $2, $3::bigint, $4, $5, $6)
+         ON CONFLICT (account_id, message_id) DO UPDATE SET
+           winner_provider = EXCLUDED.winner_provider,
+           loser_providers = EXCLUDED.loser_providers,
+           updated_at = now()`,
+        [
+          input.accountId,
+          input.conversationId,
+          input.message.id,
+          input.message.task_type,
+          pick.provider,
+          candidates.filter((c, i) => i !== input.chosen && !c.failed).map((c) => c.provider),
+        ]
+      );
+      return updated.rows[0] ?? null;
+    });
+  } catch (error: unknown) {
+    logCaught("conversations.service.chooseCandidate", error);
     throw error;
   }
 }

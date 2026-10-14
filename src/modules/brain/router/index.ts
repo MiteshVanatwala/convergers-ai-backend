@@ -1,6 +1,6 @@
 import type { QueryResult } from "pg";
 import type { RouteRequest, RouteResponse } from "@convergers-ai/shared-types";
-import type { ClassificationMethod, TaskType } from "../classifier";
+import { TEXT_DOMAINS, type ClassificationMethod, type Effort, type TaskType } from "../classifier";
 import type { ProviderAdapter, ProviderResponse } from "../adapters/types";
 import { haikuAdapter, sonnetAdapter, opusAdapter } from "../adapters/anthropic";
 import { openaiImageAdapter } from "../adapters/openai";
@@ -10,6 +10,7 @@ import {
   geminiProImageAdapter,
 } from "../adapters/geminiImage";
 import { claudeImageAdapter } from "../adapters/claudeImage";
+import { wantsAnimation } from "../adapters/imageRequest";
 import { deepseekFlashAdapter, deepseekProAdapter } from "../adapters/deepseek";
 import { glmAdapter, glmFlashAdapter } from "../adapters/glm";
 import { kimiAdapter, kimiCodeAdapter } from "../adapters/kimi";
@@ -31,7 +32,7 @@ import {
   isCapacityError,
   isServerSideSetupError,
 } from "./errors";
-import { recordModelFailure, recordModelSuccess } from "../modelHealth";
+import { getModelHealth, recordModelFailure, recordModelSuccess } from "../modelHealth";
 import { recordModelCallFailure } from "../callFailures";
 import { TEST_MODE_MAX_USD, cheapestFirst, isTestModeAccount, typicalRequestUsd } from "./testMode";
 import { BYOK_FEE_CREDITS, planAttempt } from "./credits";
@@ -69,7 +70,20 @@ const ADAPTER_LOOKUP: Record<string, ProviderAdapter> = {
   [openrouterAdapter.id]: openrouterAdapter,
 };
 
-const TASK_TYPES: TaskType[] = ["text", "code", "image", "voice", "video", "research", "plan", "artifact"];
+const TASK_TYPES: TaskType[] = [
+  "text",
+  "code",
+  "image",
+  "voice",
+  "video",
+  "research",
+  "plan",
+  "artifact",
+  "math",
+  "reasoning",
+  "writing",
+  "translation",
+];
 
 function emptyHierarchy(): Record<TaskType, ProviderAdapter[]> {
   const hierarchy = {} as Record<TaskType, ProviderAdapter[]>;
@@ -117,6 +131,16 @@ export function currentChain(taskType: TaskType): readonly ProviderAdapter[] {
   return hierarchy[taskType];
 }
 
+/**
+ * The chain Auto routing walks: the task type's own, or — for a text domain
+ * (math, writing, …) with no rows configured yet — the general "text" chain.
+ */
+function chainFor(taskType: TaskType): ProviderAdapter[] {
+  const own = hierarchy[taskType];
+  if (own.length === 0 && TEXT_DOMAINS.includes(taskType)) return hierarchy.text;
+  return own;
+}
+
 export async function reloadHierarchy(): Promise<void> {
   const pool = getPool();
   const [routingResult, registryResult]: [QueryResult<RoutingRow>, QueryResult<RegistryRow>] =
@@ -156,8 +180,24 @@ export async function reloadHierarchy(): Promise<void> {
 
 /** Live progress events for the streaming path — lets a client know the actual routing decision as it happens. */
 export type StageEvent =
-  | { stage: "classify"; taskType: TaskType; method: ClassificationMethod }
+  | { stage: "classify"; taskType: TaskType; method: ClassificationMethod; effort: Effort }
   | { stage: "redact" }
+  /** Web search (search/webSearch.ts): `sources` is how many pages it will cite. */
+  | { stage: "search"; status: "start" | "done" | "failed"; query: string; sources?: number }
+  /** Council / debate / compare: one member's progress. `index` 0 = Model A. */
+  | {
+      stage: "member";
+      index: number;
+      provider: string;
+      round: "answer" | "debate";
+      status: "start" | "done" | "failed";
+    }
+  /** Council / debate: the chair writing the final verdict. */
+  | { stage: "judge"; provider: string }
+  /** Deep research: the sub-questions it will investigate. */
+  | { stage: "plan"; steps: string[] }
+  /** Deep research: the model writing the report. */
+  | { stage: "writing"; provider: string }
   /** `pick`: the user's explicit model choice, or chosen automatically for the task type. */
   | { stage: "route"; provider: string; attempt: number; pick: "explicit" | "auto" | "test" }
   | { stage: "generating"; provider: string; inputTokens: number };
@@ -197,9 +237,12 @@ async function resolveChain(
   accountId: string,
   ctx?: RouteUsageContext
 ): Promise<ProviderAdapter[]> {
-  const chain = hierarchy[taskType];
+  const chain = chainFor(taskType);
   if (chain.length === 0) {
     await persistError(accountId, taskType, "unconfigured", ctx);
+    if (taskType === "video") {
+      throw new UserFacingError("Video generation isn't available yet. It's coming soon.");
+    }
     // Admin-facing detail stays in the log; the user gets a plain explanation.
     console.warn(
       `[router] no enabled provider for taskType="${taskType}" — enable one on the admin panel's Providers page`
@@ -228,7 +271,7 @@ async function resolveExplicitProvider(
     await persistError(accountId, taskType, providerId, ctx);
     throw new UserFacingError(`"${labelFor(providerId)}" isn't a valid or currently available model.`);
   }
-  return [adapter, ...hierarchy[taskType].filter((a) => a.id !== adapter.id)];
+  return [adapter, ...chainFor(taskType).filter((a) => a.id !== adapter.id)];
 }
 
 /**
@@ -278,7 +321,9 @@ async function resolveRouteChain(
   // still-image model) — unless none can, then let the chain try anyway.
   const capable = fullChain.filter((a) => !a.canHandle || a.canHandle(request));
   const usable = capable.length > 0 ? capable : fullChain;
-  const narrowed = capable.length > 0 && capable.length < fullChain.length;
+  // Only animation narrows the choice in a way worth explaining on failure
+  // ("only these models can make GIFs"); skipping a costly model for a photo isn't.
+  const narrowed = capable.length > 0 && capable.length < fullChain.length && wantsAnimation(request.input);
   // Test mode also leaves out pricey models, unless they're all that can do it (e.g. GIFs).
   const affordable = testMode ? usable.filter((a) => typicalRequestUsd(a) <= TEST_MODE_MAX_USD) : usable;
   const chain = affordable.length > 0 ? affordable : usable;
@@ -572,4 +617,85 @@ export async function routeStream(
     ctx,
     { explicitPick, narrowed, skippedForCost, signal }
   );
+}
+
+/** The adapter behind a provider_registry id, if this backend has one. */
+export function adapterFor(providerId: string): ProviderAdapter | undefined {
+  return ADAPTER_LOOKUP[providerId];
+}
+
+/** Its last call failed for a reason that won't fix itself in seconds (bad key, no balance). */
+function recentlyBroken(adapter: ProviderAdapter): boolean {
+  const health = getModelHealth(adapter.id);
+  return health.lastAttemptFailed && (health.lastFailure?.kind === "auth" || health.lastFailure?.kind === "account");
+}
+
+/**
+ * Candidates for multi-model modes (council, compare, cross-check, deep
+ * research): the task type's Auto chain after test-mode, capability and org
+ * filters — one model per provider first, so members come from different
+ * model families, then the rest; models whose provider account is failing go last.
+ */
+export async function multiModelCandidates(
+  request: RouteRequest,
+  taskType: TaskType,
+  accountId: string,
+  ctx?: RouteUsageContext
+): Promise<ProviderAdapter[]> {
+  const { chain } = await resolveRouteChain({ ...request, providerId: undefined }, taskType, accountId, ctx);
+  const healthy = chain.filter((a) => !recentlyBroken(a));
+  const ordered = [...healthy, ...chain.filter((a) => recentlyBroken(a))];
+  const seen = new Set<string>();
+  const distinct: ProviderAdapter[] = [];
+  const rest: ProviderAdapter[] = [];
+  for (const adapter of ordered) {
+    if (seen.has(adapter.keyProviderId)) rest.push(adapter);
+    else {
+      seen.add(adapter.keyProviderId);
+      distinct.push(adapter);
+    }
+  }
+  return [...distinct, ...rest];
+}
+
+/** A model the user picked for a multi-model mode — checked like an explicit pick (visible, org-allowed). */
+export async function explicitAdapter(
+  request: RouteRequest,
+  providerId: string,
+  taskType: TaskType,
+  accountId: string,
+  ctx?: RouteUsageContext
+): Promise<ProviderAdapter> {
+  const { chain } = await resolveRouteChain({ ...request, providerId }, taskType, accountId, ctx);
+  return chain[0]!;
+}
+
+/**
+ * One call to one model, billed and logged exactly like an Auto answer
+ * (credit check, usage_events row, health) — the building block for
+ * multi-model modes. Streams through `onDelta` when given.
+ */
+export async function routeWithAdapter(
+  adapter: ProviderAdapter,
+  request: RouteRequest,
+  taskType: TaskType,
+  accountId: string,
+  ctx?: RouteUsageContext,
+  { onDelta, signal }: { onDelta?: (text: string) => void; signal?: AbortSignal } = {}
+): Promise<RouteResponse> {
+  return walkChain(
+    [adapter],
+    request,
+    accountId,
+    taskType,
+    (a, planned) =>
+      onDelta ? a.streamCall(planned, onDelta, accountId, undefined, signal) : a.call(planned, accountId),
+    undefined,
+    ctx,
+    { explicitPick: true, signal }
+  );
+}
+
+export function modelLabel(providerId: string): string {
+  return labelFor(providerId);
 }

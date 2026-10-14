@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { ChatStreamRequest, RouteResponse } from "@convergers-ai/shared-types";
+import type { ChatMode, ChatStreamRequest, WebSearchSetting } from "@convergers-ai/shared-types";
 import { AppStatus } from "../../config/app-status-codes";
 import { loadEnv } from "../../config/env";
 import { requireSession } from "../../infrastructure/http/middleware/require-session";
@@ -7,11 +7,14 @@ import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
 import {
   assertHasCredits,
+  handleCrossCheck,
   handleStreamRequest,
   isSensitiveFilterEnabled,
   RequestStoppedError,
   userFacingPayload,
+  type ChatResult,
 } from "../brain";
+import { getPersonalizationSettings } from "../auth/auth.service";
 import * as usageService from "../usage/usage.service";
 import { expandHistoryArtifacts, storeAnswerArtifacts } from "../artifacts/chat-artifacts";
 import { storeAnswerImages } from "../artifacts/chat-images";
@@ -224,6 +227,95 @@ export async function deleteMessage(
   }
 }
 
+const CHAT_MODES: readonly ChatMode[] = ["standard", "council", "debate", "compare", "deep_research"];
+const WEB_SEARCH_SETTINGS: readonly WebSearchSetting[] = ["auto", "on", "off"];
+
+type AnswerParams = IdParams & { messageId: string };
+
+/** POST /v1/conversations/:id/messages/:messageId/vote — picks a compare candidate as the answer. */
+export async function voteOnAnswer(
+  request: FastifyRequest<{ Params: AnswerParams; Body: { chosen?: unknown } }>,
+  reply: FastifyReply
+) {
+  const account = await requireSession(request, reply);
+  if (!account) return;
+  const { id, messageId } = request.params;
+  if (!conversationsService.isUuid(id) || !conversationsService.isMessageId(messageId)) {
+    return fail(reply, AppStatus.MESSAGE_NOT_FOUND, "Message not found", 404);
+  }
+  const chosen = request.body?.chosen;
+  if (typeof chosen !== "number" || !Number.isInteger(chosen) || chosen < 0) {
+    return fail(reply, AppStatus.ANSWER_VOTE_VALIDATION_FAILED, "chosen must be a candidate index", 400);
+  }
+  try {
+    const found = await conversationsService.getAnswerWithPrompt(account.id, id, messageId);
+    if (!found) return fail(reply, AppStatus.MESSAGE_NOT_FOUND, "Message not found", 404);
+    if (found.answer.metadata?.mode !== "compare") {
+      return fail(reply, AppStatus.ANSWER_VOTE_VALIDATION_FAILED, "This answer isn't a comparison", 400);
+    }
+    const updated = await conversationsService.chooseCandidate({
+      accountId: account.id,
+      conversationId: id,
+      message: found.answer,
+      chosen,
+    });
+    if (!updated) {
+      return fail(reply, AppStatus.ANSWER_VOTE_VALIDATION_FAILED, "No such candidate", 400);
+    }
+    return ok(reply, AppStatus.ANSWER_VOTE_RECORDED, conversationsService.mapMessage(updated));
+  } catch (error: unknown) {
+    logCaught("conversations.controller.voteOnAnswer", error);
+    return fail(reply, AppStatus.ANSWER_VOTE_FAILED, "Failed to record your choice", 500);
+  }
+}
+
+/** POST /v1/conversations/:id/messages/:messageId/crosscheck — a second model checks this answer. */
+export async function crossCheckAnswer(
+  request: FastifyRequest<{ Params: AnswerParams }>,
+  reply: FastifyReply
+) {
+  const account = await requireSession(request, reply);
+  if (!account) return;
+  const { id, messageId } = request.params;
+  if (!conversationsService.isUuid(id) || !conversationsService.isMessageId(messageId)) {
+    return fail(reply, AppStatus.MESSAGE_NOT_FOUND, "Message not found", 404);
+  }
+  try {
+    const found = await conversationsService.getAnswerWithPrompt(account.id, id, messageId);
+    if (!found || !found.prompt || found.answer.status !== "complete" || !found.answer.content.trim()) {
+      return fail(reply, AppStatus.MESSAGE_NOT_FOUND, "There's no finished answer to check here", 404);
+    }
+    const history = found.history
+      .filter((m) => m.status === "complete" && (m.role === "user" || m.role === "assistant"))
+      .slice(-10)
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    const { customInstructions } = await getPersonalizationSettings(account.id);
+    const { crosscheck, usageEventId } = await handleCrossCheck({
+      question: found.prompt.content,
+      answer: found.answer.content,
+      answerProvider: found.answer.provider,
+      otherProviders: [...(found.answer.metadata?.candidates ?? []), ...(found.answer.metadata?.members ?? [])]
+        .filter((m) => !m.failed)
+        .map((m) => m.provider),
+      history: await expandHistoryArtifacts(account.id, history),
+      accountId: account.id,
+      customInstructions,
+      conversationId: id,
+    });
+    await conversationsService.mergeMessageMetadata(account.id, messageId, { crosscheck });
+    if (usageEventId) {
+      await usageService.attachMessage(usageEventId, messageId, id).catch((attachErr: unknown) =>
+        logCaught("conversations.controller.crossCheckAnswer.attach", attachErr)
+      );
+    }
+    return ok(reply, AppStatus.CROSSCHECK_COMPLETED, { crosscheck });
+  } catch (error: unknown) {
+    logCaught("conversations.controller.crossCheckAnswer", error);
+    const payload = userFacingPayload(error);
+    return fail(reply, AppStatus.CROSSCHECK_FAILED, payload.message, 502);
+  }
+}
+
 function writeSseHeaders(request: FastifyRequest, reply: FastifyReply) {
   const corsHeaders = reply.getHeaders();
   reply.hijack();
@@ -271,6 +363,22 @@ export async function chatStream(
     typeof body.replaceFromMessageId === "string" ? body.replaceFromMessageId.trim() : null;
   if (replaceFrom && (!requestedId || !conversationsService.isMessageId(replaceFrom))) {
     return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid replaceFromMessageId", 400);
+  }
+  const mode: ChatMode = body.mode ?? "standard";
+  if (!CHAT_MODES.includes(mode)) {
+    return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid mode", 400);
+  }
+  const webSearch: WebSearchSetting = body.webSearch ?? "auto";
+  if (!WEB_SEARCH_SETTINGS.includes(webSearch)) {
+    return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid webSearch", 400);
+  }
+  const compareProviderIds = body.compareProviderIds ?? [];
+  if (
+    !Array.isArray(compareProviderIds) ||
+    compareProviderIds.length > 3 ||
+    compareProviderIds.some((id) => typeof id !== "string")
+  ) {
+    return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid compareProviderIds", 400);
   }
 
   const res = writeSseHeaders(request, reply);
@@ -368,7 +476,8 @@ export async function chatStream(
       ...(history.length > 0 ? { history } : {}),
     };
 
-    let rawResult: RouteResponse;
+    const { customInstructions } = await getPersonalizationSettings(account.id);
+    let rawResult: ChatResult;
     try {
       rawResult = await handleStreamRequest(
         routeBody,
@@ -376,7 +485,14 @@ export async function chatStream(
         (text) => send("delta", { text }),
         (event) => send("stage", event),
         { conversationId: conversation.id },
-        { artifacts: true, signal: stop.signal }
+        {
+          artifacts: true,
+          signal: stop.signal,
+          mode,
+          webSearch,
+          compareProviderIds,
+          customInstructions,
+        }
       );
     } catch (err) {
       if (!(err instanceof RequestStoppedError)) throw err;
@@ -404,7 +520,7 @@ export async function chatStream(
       conversationId: conversation.id,
       content: withImages.content,
     });
-    const result: RouteResponse = { ...rawResult, content: stored.content };
+    const { usageEventIds, ...result } = { ...rawResult, content: stored.content };
 
     const assistantMessage = await conversationsService.insertMessage({
       conversationId: conversation.id,
@@ -416,16 +532,14 @@ export async function chatStream(
       tokensOutput: result.usage.output_tokens,
       creditsCharged: result.credits_charged,
       status: result.stopped ? "cancelled" : "complete",
+      metadata: result.metadata ?? null,
     });
     unanswered = null;
 
-    if (result.usage_event_id) {
+    // Every call that went into the answer (search, council members, chair…).
+    for (const usageEventId of usageEventIds) {
       try {
-        await usageService.attachMessage(
-          result.usage_event_id,
-          assistantMessage.id,
-          conversation.id
-        );
+        await usageService.attachMessage(usageEventId, assistantMessage.id, conversation.id);
       } catch (attachErr: unknown) {
         request.log.error(
           { err: attachErr },
@@ -453,7 +567,7 @@ export async function chatStream(
       }
     }
 
-    send("done", { ...result, conversationId: conversation.id });
+    send("done", { ...result, conversationId: conversation.id, assistant_message_id: assistantMessage.id });
   } catch (err) {
     request.log.error(err);
     const payload = userFacingPayload(err);

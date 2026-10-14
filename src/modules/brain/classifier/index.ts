@@ -1,7 +1,35 @@
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import { classifyWithModel } from "./model";
 
-export type TaskType = "text" | "code" | "image" | "voice" | "video" | "research" | "plan" | "artifact";
+export type TaskType =
+  | "text"
+  | "code"
+  | "image"
+  | "voice"
+  | "video"
+  | "research"
+  | "plan"
+  | "artifact"
+  | "math"
+  | "reasoning"
+  | "writing"
+  | "translation";
+
+/**
+ * Text-answer domains that get their own Auto chain, so each can lead with
+ * the models best at it. Until an admin configures one, it uses the "text"
+ * chain (router/index.ts) — nothing breaks for a domain with no rows yet.
+ */
+export const TEXT_DOMAINS: readonly TaskType[] = ["math", "reasoning", "writing", "translation"];
+
+/**
+ * How hard the model should think. Adapters map it onto each provider's own
+ * reasoning control (adapters/reasoning.ts): "quick" turns reasoning down or
+ * off (greetings, one-line facts), "deep" turns it up (proofs, multi-step
+ * maths, tricky logic), "standard" leaves the provider's default — except
+ * where that default is needlessly high.
+ */
+export type Effort = "quick" | "standard" | "deep";
 
 const CODE_SIGNS = /```|\bfunction\b|=>|\bclass \w+|\bimport .+ from\b|\bdef \w+\(/;
 
@@ -85,10 +113,63 @@ const ARTIFACT_SIGNS = new RegExp(
 // strategy requests, which route to a stronger reasoning model (see router).
 const PLAN_SIGNS = /\broadmap\b|\b(project|action|strategic|business)\s+plan\b|\bplan\b\s+(for|to|my|our|a|an|the)\b/i;
 
+// "solve 2x + 3 = 7", "integral of x^2", "prove that √2 is irrational",
+// LaTeX. Deliberately conservative — ambiguous ones ("what's the
+// probability it rains") go to the model.
+const MATH_SIGNS = new RegExp(
+  [
+    String.raw`\b(?:solve|simplify|factori[sz]e|integrate|differentiate|evaluate|expand)\b.{0,40}(?:[=^√∫²³]|\d\s*[a-z]\b|\bequations?\b|\bfor [a-z]\b)`,
+    String.raw`\b(?:integral of|derivative of|eigen(?:values?|vectors?)|determinant of|differential equations?|quadratic equations?|polynomials?|trigonometr\w*|logarithms?|calculus|theorem|lemma|prove that|proof that|probability (?:that|of)|permutations? of|n ?choose ?k)\b`,
+    String.raw`\\(?:frac|int|sum|sqrt|lim|binom)\b`,
+    String.raw`\b\d*[a-z]\s*\^\s*\d|\b\d+[a-z]\s*[+\-=]\s*\d`,
+  ].join("|"),
+  "i"
+);
+
+// Riddles and logic puzzles — not "recommend puzzle games".
+const REASONING_SIGNS = /\b(?:riddle|brain ?teasers?|logic(?:al)? puzzles?|syllogisms?|lateral thinking)\b/i;
+
+// "translate this into Hindi" — a natural language as the target, so
+// "translate this Python to Go" stays with code.
+const TRANSLATION_SIGNS = new RegExp(
+  String.raw`\btranslat\w*\b.{0,80}\b(?:to|into|in)\s+(?:` +
+    [
+      "english", "hindi", "marathi", "gujarati", "bengali", "bangla", "tamil", "telugu", "kannada",
+      "malayalam", "punjabi", "odia", "urdu", "sanskrit", "nepali", "french", "spanish", "german",
+      "italian", "portuguese", "dutch", "russian", "arabic", "persian", "turkish", "chinese",
+      "mandarin", "japanese", "korean", "thai", "vietnamese", "indonesian", "malay", "swahili",
+    ].join("|") +
+    String.raw`)\b`,
+  "i"
+);
+
+// "write an email to my landlord", "draft a cover letter", "compose a poem"
+// — prose where tone and style matter. Checked before code so "a cover
+// letter for a Python developer role" isn't sent to a coding model.
+const WRITING_SIGNS = /^\s*(?:(?:please|pls|can you|could you|help me)\s+)?(?:write|draft|compose|pen)\b.{0,40}\b(?:e-?mail|letter|cover letter|essay|poem|story|short story|blog post|article|speech|caption|tweet|linkedin post|bio|toast|eulogy|lyrics|song|script for|wedding|invitation|apology|announcement|newsletter)\b/i;
+
+const QUICK_SIGNS = /^\s*(?:hi|hii+|hello|hey|yo|thanks?|thank you|thx|ok(?:ay)?|cool|great|nice|good (?:morning|afternoon|evening|night)|bye|yes|no|sure|got it)\b[\s!.?,]*$/i;
+const DEEP_SIGNS = /\b(?:step[- ]by[- ]step|think (?:hard|carefully|deeply)|in depth|rigorous(?:ly)?|prove|proof|derive|show (?:your|the) work|edge cases)\b/i;
+const TEXT_ANSWER_TYPES = new Set<TaskType>(["text", "code", "research", "plan", "artifact", ...TEXT_DOMAINS]);
+
+/**
+ * Effort when the rules (or a hint) decided the task type and no model was
+ * asked: maths and logic think hard, small talk and translation don't.
+ */
+export function estimateEffort(request: RouteRequest, taskType: TaskType): Effort {
+  if (!TEXT_ANSWER_TYPES.has(taskType)) return "standard";
+  const input = request.input.trim();
+  if (QUICK_SIGNS.test(input)) return "quick";
+  if (taskType === "math" || taskType === "reasoning" || DEEP_SIGNS.test(input)) return "deep";
+  if (taskType === "translation") return "quick";
+  if (taskType === "text" && input.length <= 40 && !request.history?.length) return "quick";
+  return "standard";
+}
+
 /** How a request's task type was decided — surfaced to the client in the "classify" stage. */
 export type ClassificationMethod = "hint" | "rules" | "model" | "default";
 
-export type Classification = { taskType: TaskType; method: ClassificationMethod };
+export type Classification = { taskType: TaskType; method: ClassificationMethod; effort: Effort };
 
 /**
  * The rules pass: returns a task type only when a pattern is confident,
@@ -101,7 +182,11 @@ export function classifyByRules(request: RouteRequest): TaskType | null {
   if (isImageFollowUp(request)) return "image";
   if (ARTIFACT_SIGNS.test(request.input)) return "artifact";
   if (PLAN_SIGNS.test(request.input)) return "plan";
+  if (TRANSLATION_SIGNS.test(request.input)) return "translation";
+  if (WRITING_SIGNS.test(request.input)) return "writing";
   if (CODE_SIGNS.test(request.input) || CODE_INTENT_SIGNS.test(request.input)) return "code";
+  if (MATH_SIGNS.test(request.input)) return "math";
+  if (REASONING_SIGNS.test(request.input)) return "reasoning";
   return null;
 }
 
@@ -112,13 +197,24 @@ export function classifyByRules(request: RouteRequest): TaskType | null {
  * request falls back to "text" — the same answer the rules-only version gave.
  */
 export async function classifyRequest(request: RouteRequest): Promise<Classification> {
-  if (request.modality_hint) return { taskType: request.modality_hint as TaskType, method: "hint" };
+  // A spoken request (voice mode) is still answered in text — classify what was said.
+  const hint = request.modality_hint === "voice" ? undefined : request.modality_hint;
+  if (hint) {
+    const taskType = hint as TaskType;
+    return { taskType, method: "hint", effort: estimateEffort(request, taskType) };
+  }
 
   const byRules = classifyByRules(request);
-  if (byRules) return { taskType: byRules, method: "rules" };
+  if (byRules) return { taskType: byRules, method: "rules", effort: estimateEffort(request, byRules) };
 
   const byModel = await classifyWithModel(request);
-  if (byModel) return { taskType: byModel, method: "model" };
+  if (byModel) {
+    return {
+      taskType: byModel.taskType,
+      method: "model",
+      effort: byModel.effort ?? estimateEffort(request, byModel.taskType),
+    };
+  }
 
-  return { taskType: "text", method: "default" };
+  return { taskType: "text", method: "default", effort: estimateEffort(request, "text") };
 }

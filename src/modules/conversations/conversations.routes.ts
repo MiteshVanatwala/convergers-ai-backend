@@ -32,6 +32,16 @@ export function registerConversationRoutes(app: FastifyInstance): void {
     (request, reply) => conversationsController.deleteMessage(request, reply)
   );
 
+  app.post<{ Params: { id: string; messageId: string }; Body: { chosen?: unknown } }>(
+    "/v1/conversations/:id/messages/:messageId/vote",
+    (request, reply) => conversationsController.voteOnAnswer(request, reply)
+  );
+
+  app.post<{ Params: { id: string; messageId: string } }>(
+    "/v1/conversations/:id/messages/:messageId/crosscheck",
+    (request, reply) => conversationsController.crossCheckAnswer(request, reply)
+  );
+
   app.post<{ Body: ChatStreamRequest }>("/v1/chat/stream", (request, reply) =>
     conversationsController.chatStream(request, reply)
   );
