@@ -334,11 +334,11 @@ async function databaseGroup(): Promise<{ group: SetupGroup; invoicesTableExists
 
 async function providersGroup(): Promise<SetupGroup> {
   const pool = getPool();
-  // Credentials actually used by an enabled routing rule.
+  // Credentials actually used by an enabled routing rule (of a model that's on in Models).
   const used: QueryResult<{ key_provider_id: string }> = await pool.query(
     `SELECT DISTINCT pr.key_provider_id
      FROM provider_routing_rules rr JOIN provider_registry pr ON pr.id = rr.provider_id
-     WHERE rr.enabled AND pr.status = 'active' AND pr.key_provider_id IS NOT NULL`
+     WHERE rr.enabled AND pr.status = 'active' AND pr.visible_to_users AND pr.key_provider_id IS NOT NULL`
   );
   const usedIds = new Set(used.rows.map((r) => r.key_provider_id));
   // Recent failures per credential — e.g. a key that's set but rejected.

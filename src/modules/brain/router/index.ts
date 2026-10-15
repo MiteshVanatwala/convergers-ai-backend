@@ -110,8 +110,8 @@ let hierarchy: Record<TaskType, ProviderAdapter[]> = emptyHierarchy();
 /**
  * Models an explicit user pick is allowed to target — kept in sync with
  * `reloadHierarchy()` for the same reason (no DB round-trip on the request
- * hot path). Independent of `hierarchy`: a model can be visible here without
- * being part of any task type's automatic chain, or vice versa.
+ * hot path). A hidden model is also left out of every automatic chain; a
+ * visible one need not be part of any.
  */
 let visibleProviderIds = new Set<string>();
 
@@ -149,7 +149,7 @@ export async function reloadHierarchy(): Promise<void> {
         `SELECT rr.task_type, rr.provider_id
          FROM provider_routing_rules rr
          JOIN provider_registry pr ON pr.id = rr.provider_id
-         WHERE rr.enabled = true AND pr.status = 'active'
+         WHERE rr.enabled = true AND pr.status = 'active' AND pr.visible_to_users = true
          ORDER BY rr.task_type, rr.rank ASC`
       ),
       pool.query(

@@ -34,6 +34,8 @@ export type RoutingEntry = {
   label: string;
   rank: number;
   enabled: boolean;
+  /** Off in Models (visible_to_users = false): auto routing skips it whatever `enabled` says. */
+  modelVisible: boolean;
   credentialConfigured: boolean;
 };
 
@@ -331,9 +333,10 @@ export async function listRoutingRules(): Promise<Record<string, RoutingEntry[]>
       label: string;
       rank: number;
       enabled: boolean;
+      visible_to_users: boolean;
       key_provider_id: string | null;
     }> = await pool.query(
-      `SELECT rr.task_type, rr.provider_id, pr.label, rr.rank, rr.enabled, pr.key_provider_id
+      `SELECT rr.task_type, rr.provider_id, pr.label, rr.rank, rr.enabled, pr.visible_to_users, pr.key_provider_id
        FROM provider_routing_rules rr
        JOIN provider_registry pr ON pr.id = rr.provider_id
        ORDER BY rr.task_type, rr.rank ASC`
@@ -350,6 +353,7 @@ export async function listRoutingRules(): Promise<Record<string, RoutingEntry[]>
         label: row.label,
         rank: row.rank,
         enabled: row.enabled,
+        modelVisible: row.visible_to_users,
         credentialConfigured: row.key_provider_id ? isConfigured(row.key_provider_id) : false,
       });
     }
@@ -381,8 +385,13 @@ export async function updateRoutingRules(input: {
 
   try {
     const result = await withAdminTransaction(input.actorId, async (client: PoolClient) => {
-      const known = await client.query<{ id: string; label: string; key_provider_id: string | null }>(
-        `SELECT id, label, key_provider_id FROM provider_registry WHERE id = ANY($1::text[])`,
+      const known = await client.query<{
+        id: string;
+        label: string;
+        visible_to_users: boolean;
+        key_provider_id: string | null;
+      }>(
+        `SELECT id, label, visible_to_users, key_provider_id FROM provider_registry WHERE id = ANY($1::text[])`,
         [input.entries.map((e) => e.providerId)]
       );
       const knownById = new Map(known.rows.map((r) => [r.id, r]));
@@ -410,6 +419,7 @@ export async function updateRoutingRules(input: {
           label: meta.label,
           rank,
           enabled: entry.enabled,
+          modelVisible: meta.visible_to_users,
           credentialConfigured: meta.key_provider_id ? isConfigured(meta.key_provider_id) : false,
         });
       }

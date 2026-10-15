@@ -262,7 +262,7 @@ export async function getDashboardSnapshot(range: DashboardRange): Promise<Dashb
           `SELECT pr.id, pr.label, pr.status, pr.visible_to_users, pr.key_provider_id,
                   coalesce((SELECT array_agg(DISTINCT rr.task_type ORDER BY rr.task_type)
                             FROM provider_routing_rules rr
-                            WHERE rr.provider_id = pr.id AND rr.enabled), '{}') AS routed_for,
+                            WHERE rr.provider_id = pr.id AND rr.enabled AND pr.visible_to_users), '{}') AS routed_for,
                   u.served, u.failed, u.last_at
            FROM provider_registry pr
            LEFT JOIN (
