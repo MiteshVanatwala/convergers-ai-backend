@@ -229,6 +229,7 @@ export async function deleteMessage(
 
 const CHAT_MODES: readonly ChatMode[] = ["standard", "council", "debate", "compare", "deep_research"];
 const WEB_SEARCH_SETTINGS: readonly WebSearchSetting[] = ["auto", "on", "off"];
+const MODALITY_HINTS: readonly NonNullable<ChatStreamRequest["modality_hint"]>[] = ["text", "code", "image", "voice", "video"];
 
 type AnswerParams = IdParams & { messageId: string };
 
@@ -371,6 +372,9 @@ export async function chatStream(
   const webSearch: WebSearchSetting = body.webSearch ?? "auto";
   if (!WEB_SEARCH_SETTINGS.includes(webSearch)) {
     return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid webSearch", 400);
+  }
+  if (body.modality_hint !== undefined && !MODALITY_HINTS.includes(body.modality_hint)) {
+    return fail(reply, AppStatus.CHAT_STREAM_VALIDATION_FAILED, "Invalid modality_hint", 400);
   }
   const compareProviderIds = body.compareProviderIds ?? [];
   if (

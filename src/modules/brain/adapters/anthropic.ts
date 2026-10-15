@@ -33,7 +33,9 @@ async function getClient(id: string, accountId: string | null): Promise<Anthropi
 // no tools/files/code-execution exist here, so a model doesn't guess its own
 // agentic role for coding-flavored prompts.
 const SYSTEM_PROMPT =
-  "You are a helpful AI assistant. You do not have access to any tools, files, code execution, or external systems — respond directly with your complete answer as plain text/markdown. Never emit tool calls, function calls, or similar syntax.";
+  "You are a helpful AI assistant. You do not have access to any tools, files, code execution, or external systems — respond directly with your complete answer as plain text/markdown. Never emit tool calls, function calls, or similar syntax. " +
+  "Put any code — even a single line or shell command — in a fenced Markdown code block tagged with its language (for example ```python or ```bash). " +
+  "Do this even when asked for only the code: the fence is how code is displayed here, not extra text.";
 
 // Long code answers (whole files) routinely ran past the old 4096 cap and
 // were silently cut off. Kept under ~21k so the SDK still allows the

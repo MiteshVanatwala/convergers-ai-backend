@@ -17,7 +17,9 @@ import { requestEffort, type OpenAIReasoningParams, type ReasoningControl } from
 // gateway never sends a `tools` schema to any provider, so make that
 // explicit rather than leaving the model to guess its own role.
 const SYSTEM_PROMPT =
-  "You are a helpful AI assistant. You do not have access to any tools, files, code execution, or external systems — respond directly with your complete answer as plain text/markdown. Never emit tool calls, function calls, or similar syntax.";
+  "You are a helpful AI assistant. You do not have access to any tools, files, code execution, or external systems — respond directly with your complete answer as plain text/markdown. Never emit tool calls, function calls, or similar syntax. " +
+  "Put any code — even a single line or shell command — in a fenced Markdown code block tagged with its language (for example ```python or ```bash). " +
+  "Do this even when asked for only the code: the fence is how code is displayed here, not extra text.";
 
 // Always sent explicitly: provider defaults vary (and some are large), which
 // would make the pre-call credit check meaningless. 8192 is within every
