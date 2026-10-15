@@ -24,6 +24,32 @@ export function wantsDrawnGraphic(prompt: string): boolean {
   return DRAWN_GRAPHIC.test(prompt);
 }
 
+const IMAGE_MARKDOWN = /!\[[^\]]*\]\((?:\/v1\/files\/[0-9a-f-]{36}|data:image\/[^)]*)\)/g;
+
+/**
+ * Earlier turns as plain text, so "a cover image for the story above" knows the
+ * story. Image links are dropped (the latest image is passed as pixels — see
+ * `previousImage`); turns left empty are skipped and the neighbours that leaves
+ * side by side are merged, so roles alternate starting with the user.
+ */
+export function contextTurns(
+  request: RouteRequest,
+  { maxTurns = 6, maxCharsPerTurn = 12_000 }: { maxTurns?: number; maxCharsPerTurn?: number } = {}
+): Array<{ role: "user" | "assistant"; text: string }> {
+  const turns = (request.history ?? [])
+    .slice(-maxTurns)
+    .map((turn) => ({ role: turn.role, text: turn.content.replace(IMAGE_MARKDOWN, "").trim().slice(0, maxCharsPerTurn) }))
+    .filter((turn) => turn.text);
+  while (turns[0]?.role === "assistant") turns.shift();
+  const merged: typeof turns = [];
+  for (const turn of turns) {
+    const last = merged[merged.length - 1];
+    if (last?.role === turn.role) last.text = `${last.text}\n\n${turn.text}`;
+    else merged.push({ ...turn });
+  }
+  return merged;
+}
+
 /** The latest image this account generated earlier in the conversation, if any. */
 export async function previousImage(
   request: RouteRequest,

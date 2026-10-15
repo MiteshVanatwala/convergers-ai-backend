@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import type { ProviderAdapter, ProviderResponse } from "./types";
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import { resolveKeyForAccount } from "./accountKeyResolver";
-import { wantsAnimation } from "./imageRequest";
+import { contextTurns, wantsAnimation } from "./imageRequest";
 
 // Constructed fresh per call, not cached — see anthropic.ts for why.
 async function getClient(accountId: string | null): Promise<OpenAI> {
@@ -16,6 +16,18 @@ async function getClient(accountId: string | null): Promise<OpenAI> {
 // real rate card. Verify at https://platform.openai.com/pricing before
 // relying on this for anything beyond the demo.
 const IMAGE_FLAT_COST_USD = 0.04;
+
+// gpt-image-1 takes one prompt (up to 32,000 characters), so earlier turns go
+// in front of the request as context — "a cover for the story above".
+const MAX_CONTEXT_CHARS = 24_000;
+
+function promptWithContext(request: RouteRequest): string {
+  const context = contextTurns(request)
+    .map((turn) => `${turn.role === "user" ? "User" : "Assistant"}: ${turn.text}`)
+    .join("\n\n")
+    .slice(-MAX_CONTEXT_CHARS);
+  return context ? `Conversation so far, for context:\n\n${context}\n\nNow create this image: ${request.input}` : request.input;
+}
 
 /**
  * OpenAI's gpt-image-1 — the first non-Anthropic provider wired up, proving
@@ -33,7 +45,7 @@ export const openaiImageAdapter: ProviderAdapter = {
     const client = await getClient(accountId);
     const response = await client.images.generate({
       model: "gpt-image-1",
-      prompt: request.input,
+      prompt: promptWithContext(request),
       size: "1024x1024",
       quality: "medium",
       n: 1,

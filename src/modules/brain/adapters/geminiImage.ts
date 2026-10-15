@@ -1,7 +1,7 @@
 import type { RouteRequest } from "@convergers-ai/shared-types";
 import type { ProviderAdapter, ProviderResponse } from "./types";
 import { resolveKeyForAccount } from "./accountKeyResolver";
-import { previousImage, wantsAnimation } from "./imageRequest";
+import { contextTurns, previousImage, wantsAnimation } from "./imageRequest";
 import { UserFacingError } from "../router/errors";
 
 /**
@@ -81,12 +81,18 @@ function createGeminiImageAdapter(config: {
       const apiKey = await resolveKeyForAccount(config.id, "gemini", "Google Gemini", accountId);
       const prompt = request.input;
       const earlier = await previousImage(request, accountId);
-      const contents = earlier
-        ? [
-            { role: "model", parts: [{ inlineData: earlier }] },
-            { role: "user", parts: [{ text: prompt }] },
-          ]
-        : [{ role: "user", parts: [{ text: prompt }] }];
+      // Earlier turns as text, then the latest image (if editing one), then the request.
+      const contents: Array<{ role: "user" | "model"; parts: GeminiPart[] }> = contextTurns(request).map((turn) => ({
+        role: turn.role === "assistant" ? "model" : "user",
+        parts: [{ text: turn.text }],
+      }));
+      if (earlier) {
+        const last = contents[contents.length - 1];
+        // Kept in the model's last turn rather than a second model turn in a row.
+        if (last?.role === "model") last.parts.push({ inlineData: earlier });
+        else contents.push({ role: "model", parts: [{ inlineData: earlier }] });
+      }
+      contents.push({ role: "user", parts: [{ text: prompt }] });
       const aspectRatio = aspectRatioFor(prompt);
 
       const res = await fetch(`${ENDPOINT}/${encodeURIComponent(config.model)}:generateContent`, {
