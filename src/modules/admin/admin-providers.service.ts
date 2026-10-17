@@ -265,7 +265,15 @@ export async function setCapabilities(input: {
   }
 
   try {
-    return await withAdminTransaction(input.actorId, async (client: PoolClient) => {
+    const entry = await withAdminTransaction(input.actorId, async (client: PoolClient) => {
+      const before = await client.query<{ capabilities: string[] }>(
+        `SELECT capabilities FROM provider_registry WHERE id = $1 FOR UPDATE`,
+        [input.providerId]
+      );
+      const previous = Array.isArray(before.rows[0]?.capabilities) ? before.rows[0].capabilities : [];
+      const added = capabilities.filter((c) => !previous.includes(c));
+      const removed = previous.filter((c) => !capabilities.includes(c));
+
       const result = await client.query<{
         id: string;
         label: string;
@@ -293,13 +301,43 @@ export async function setCapabilities(input: {
         credentialLabel = cred.rows[0]?.label ?? null;
       }
 
+      // Only the boxes ticked or unticked in this change touch routing: a newly
+      // ticked task type puts the model at the end of that list (enabled), an
+      // unticked one takes it out. Older ticks with no routing row stay as
+      // they are.
+      for (const taskType of added) {
+        await client.query(
+          `INSERT INTO provider_routing_rules (task_type, provider_id, rank, enabled)
+           SELECT $1, $2, COALESCE(MAX(rank), 0) + 1, true
+           FROM provider_routing_rules WHERE task_type = $1
+           ON CONFLICT (task_type, provider_id) DO NOTHING`,
+          [taskType, row.id]
+        );
+      }
+      for (const taskType of removed) {
+        await client.query(
+          `DELETE FROM provider_routing_rules WHERE task_type = $1 AND provider_id = $2`,
+          [taskType, row.id]
+        );
+        await client.query(
+          `UPDATE provider_routing_rules rr
+           SET rank = ordered.new_rank
+           FROM (
+             SELECT id, ROW_NUMBER() OVER (ORDER BY rank, id) AS new_rank
+             FROM provider_routing_rules WHERE task_type = $1
+           ) ordered
+           WHERE rr.id = ordered.id AND rr.rank <> ordered.new_rank`,
+          [taskType]
+        );
+      }
+
       await appendAdminAudit(
         {
           adminUserId: input.actorId,
           action: "provider.set_capabilities",
           targetType: "provider_registry",
           targetId: row.id,
-          meta: { capabilities },
+          meta: { capabilities, routingAdded: added, routingRemoved: removed },
         },
         client
       );
@@ -313,10 +351,11 @@ export async function setCapabilities(input: {
         visible: row.visible_to_users,
         capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
       };
-      // No reloadHierarchy() — capabilities is descriptive metadata, it
-      // doesn't feed the router's in-memory hierarchy the way
-      // visibility/routing rules do.
     });
+
+    // Effective immediately, no restart.
+    await reloadHierarchy();
+    return entry;
   } catch (error: unknown) {
     if (error instanceof ProviderConfigError) throw error;
     logCaught("admin.admin-providers.service.setCapabilities", error);
