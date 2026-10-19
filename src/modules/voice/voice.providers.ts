@@ -27,14 +27,17 @@ export type ProviderResult<T> = T & {
 const GROQ = "https://api.groq.com/openai/v1";
 const GEMINI = "https://generativelanguage.googleapis.com/v1beta/models";
 
+/** Charged per request on the account's own provider key (the provider bills them directly). */
+export const BYOK_VOICE_CREDITS = 1;
+
 // ---------- listen ----------
 
 /** Groq bills Whisper per hour of audio, with a 10-second minimum per request. */
-const WHISPER = [
+export const WHISPER = [
   { id: "groq:whisper-large-v3-turbo", model: "whisper-large-v3-turbo", usdPerHour: 0.04 },
   { id: "groq:whisper-large-v3", model: "whisper-large-v3", usdPerHour: 0.111 },
 ];
-const WHISPER_MIN_SECONDS = 10;
+export const WHISPER_MIN_SECONDS = 10;
 
 /** Biases spelling toward words Whisper would otherwise miss. */
 const VOCABULARY_HINT = "Aikya.";
@@ -100,16 +103,16 @@ export async function transcribe(
 // ---------- talk back ----------
 
 /** Gemini TTS list prices go up on 2027-01-01 (https://ai.google.dev/gemini-api/docs/pricing). */
-function geminiTtsRates(now = Date.now()): { inputPerToken: number; audioPerToken: number } {
+export function geminiTtsRates(now = Date.now()): { inputPerToken: number; audioPerToken: number } {
   return now >= Date.UTC(2027, 0, 1)
     ? { inputPerToken: 1e-6, audioPerToken: 18e-6 }
     : { inputPerToken: 0.5e-6, audioPerToken: 9e-6 };
 }
 
 /** Gemini audio output runs at ~25 tokens per second. */
-const GEMINI_AUDIO_TOKENS_PER_SECOND = 25;
+export const GEMINI_AUDIO_TOKENS_PER_SECOND = 25;
 /** Orpheus: $22 per million characters, at most 200 characters per request, English only. */
-const ORPHEUS_USD_PER_CHAR = 22e-6;
+export const ORPHEUS_USD_PER_CHAR = 22e-6;
 const ORPHEUS_MAX_CHARS = 200;
 const ORPHEUS_PARALLEL = 3;
 

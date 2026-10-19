@@ -624,6 +624,11 @@ export function adapterFor(providerId: string): ProviderAdapter | undefined {
   return ADAPTER_LOOKUP[providerId];
 }
 
+/** Every adapter this backend has, whether or not it's routed to (admin Pricing page). */
+export function allAdapters(): readonly ProviderAdapter[] {
+  return Object.values(ADAPTER_LOOKUP);
+}
+
 /** Its last call failed for a reason that won't fix itself in seconds (bad key, no balance). */
 function recentlyBroken(adapter: ProviderAdapter): boolean {
   const health = getModelHealth(adapter.id);

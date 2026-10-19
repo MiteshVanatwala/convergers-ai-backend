@@ -22,7 +22,10 @@ export type AdminPlanEntry = {
   id: number;
   key: string;
   displayName: string;
+  /** Charged to buyers billed outside India (USD, no GST). Null = custom pricing. */
   priceUsdCents: number | null;
+  /** Charged in India (INR, GST-inclusive). Null = custom pricing. */
+  priceInrPaise: number | null;
   includedCredits: number | null;
   rateLimitRpm: number | null;
   tagline: string | null;
@@ -37,6 +40,7 @@ type PlanRow = {
   key: string;
   display_name: string;
   price_usd_cents: number | null;
+  price_inr_paise: number | null;
   included_credits: number | null;
   rate_limit_rpm: number | null;
   features: Record<string, unknown> | string;
@@ -58,6 +62,7 @@ function mapPlanRow(row: PlanRow, highlights: string[]): AdminPlanEntry {
     key: row.key,
     displayName: row.display_name,
     priceUsdCents: row.price_usd_cents,
+    priceInrPaise: row.price_inr_paise,
     includedCredits: row.included_credits,
     rateLimitRpm: row.rate_limit_rpm,
     tagline: typeof features.tagline === "string" ? features.tagline : null,
@@ -83,7 +88,7 @@ export async function listPlansAdmin(): Promise<AdminPlanEntry[]> {
     const pool = getPool();
     const [result, highlightsByPlan] = await Promise.all([
       pool.query<PlanRow>(
-        `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features,
+        `SELECT id, key, display_name, price_usd_cents, price_inr_paise, included_credits, rate_limit_rpm, features,
                 recurring_grant_credits, recurring_grant_period_hours
          FROM plans
          ORDER BY ${PLAN_ORDER_SQL}`
@@ -131,6 +136,8 @@ export async function updatePlan(input: {
   key: string;
   displayName: string;
   priceUsdCents: number | null;
+  /** Omitted (older clients) = keep the current INR price. */
+  priceInrPaise?: number | null;
   includedCredits: number | null;
   rateLimitRpm: number | null;
   tagline: string | null;
@@ -144,6 +151,8 @@ export async function updatePlan(input: {
   }
   const tagline = input.tagline?.trim() || null;
   const priceUsdCents = nonNegativeIntOrNull(input.priceUsdCents, "priceUsdCents");
+  const priceInrPaise =
+    input.priceInrPaise === undefined ? undefined : nonNegativeIntOrNull(input.priceInrPaise, "priceInrPaise");
   const includedCredits = nonNegativeIntOrNull(input.includedCredits, "includedCredits");
   const rateLimitRpm = nonNegativeIntOrNull(input.rateLimitRpm, "rateLimitRpm");
   const recurringGrantCredits = nonNegativeInt(input.recurringGrantCredits, "recurringGrantCredits");
@@ -152,7 +161,7 @@ export async function updatePlan(input: {
   try {
     return await withAdminTransaction(input.actorId, async (client: PoolClient) => {
       const current = await client.query<PlanRow>(
-        `SELECT id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features,
+        `SELECT id, key, display_name, price_usd_cents, price_inr_paise, included_credits, rate_limit_rpm, features,
                 recurring_grant_credits, recurring_grant_period_hours
          FROM plans WHERE key = $1 FOR UPDATE`,
         [input.key]
@@ -173,13 +182,16 @@ export async function updatePlan(input: {
         self_serve: input.selfServe,
       };
 
+      // A changed price reaches new subscriptions only: the Razorpay Plan is re-created on
+      // next checkout, existing subscriptions keep billing their original amount.
       const updated = await client.query<PlanRow>(
         `UPDATE plans
          SET display_name = $2, price_usd_cents = $3, included_credits = $4,
              rate_limit_rpm = $5, features = $6::jsonb,
-             recurring_grant_credits = $7, recurring_grant_period_hours = $8
+             recurring_grant_credits = $7, recurring_grant_period_hours = $8,
+             price_inr_paise = $9
          WHERE key = $1
-         RETURNING id, key, display_name, price_usd_cents, included_credits, rate_limit_rpm, features,
+         RETURNING id, key, display_name, price_usd_cents, price_inr_paise, included_credits, rate_limit_rpm, features,
                    recurring_grant_credits, recurring_grant_period_hours`,
         [
           input.key,
@@ -190,6 +202,7 @@ export async function updatePlan(input: {
           JSON.stringify(nextFeatures),
           recurringGrantCredits,
           recurringGrantPeriodHours,
+          priceInrPaise === undefined ? row.price_inr_paise : priceInrPaise,
         ]
       );
 
@@ -202,6 +215,9 @@ export async function updatePlan(input: {
           meta: {
             displayName,
             priceUsdCents,
+            priceInrPaise: priceInrPaise === undefined ? row.price_inr_paise : priceInrPaise,
+            previousPriceInrPaise: row.price_inr_paise,
+            previousPriceUsdCents: row.price_usd_cents,
             includedCredits,
             rateLimitRpm,
             tagline,

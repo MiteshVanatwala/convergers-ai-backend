@@ -250,6 +250,17 @@ async function invoicingChecks(
           fix: "Add your legal name, GSTIN and address on the Invoicing page.",
         },
     sacCheck(seller.sacCode, b2bWithoutSac),
+    seller.lutNumber
+      ? { id: "lut", label: "LUT for USD (export) sales", status: "ok", detail: `Set — ${seller.lutNumber}.` }
+      : {
+          id: "lut",
+          label: "LUT for USD (export) sales",
+          status: "warn",
+          detail:
+            "Not set — customers billed outside India pay in USD, but their invoices aren't issued until a LUT " +
+            "number is saved (exports are zero-rated only under a LUT).",
+          fix: "File the LUT (GST RFD-11) and add its ARN on the Invoicing page, then run: npx tsx scripts/backfill-invoices.ts --apply",
+        },
   ];
   if (pendingInvoices !== null) {
     checks.push(

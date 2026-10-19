@@ -11,6 +11,7 @@ import { getSpendable } from "../ledger/spend.service";
 import * as usageService from "../usage/usage.service";
 import {
   ACCEPTED_AUDIO_TYPES,
+  BYOK_VOICE_CREDITS,
   GEMINI_VOICE,
   ORPHEUS_VOICE,
   estimateSpeechUsd,
@@ -19,8 +20,6 @@ import {
   type ProviderResult,
 } from "./voice.providers";
 
-/** Charged per request on the account's own provider key (the provider bills them directly). */
-const BYOK_VOICE_CREDITS = 1;
 /** One chunk of an answer; the client splits longer answers and plays them in order. */
 export const MAX_SPEECH_CHARS = 2000;
 export const MAX_AUDIO_BYTES = 15 * 1024 * 1024;

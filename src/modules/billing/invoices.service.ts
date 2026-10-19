@@ -1,12 +1,16 @@
 import type { PoolClient, QueryResult } from "pg";
-import { GST_STATES, type BillingProfile } from "@convergers-ai/shared-types";
+import { GST_STATES, HOME_COUNTRY, type BillingProfile } from "@convergers-ai/shared-types";
 import { getPool } from "../../infrastructure/db/pool";
 import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
 import { logCaught } from "../../shared/utils/log";
+import { type BillingCurrency, countryName, currencyForCountry } from "./currency";
 import { getEffectiveSeller } from "./seller-settings.service";
 
-/** GST on these services, in basis points. Prices are GST-inclusive. */
+/** GST on these services, in basis points. INR prices are GST-inclusive. */
 export const GST_RATE_BP = 1800;
+
+/** GST place-of-supply code for a buyer outside India: 96 = "Other Countries". */
+export const EXPORT_PLACE_OF_SUPPLY = "96";
 
 const GSTIN_RE = /^\d{2}[A-Z]{5}\d{4}[A-Z][0-9A-Z]Z[0-9A-Z]$/;
 
@@ -66,6 +70,7 @@ export function formatInvoiceNumber(prefix: string, fy: string, n: number): stri
 type ProfileOwner = { accountId: string } | { orgId: string };
 
 type ProfileRow = {
+  country_code: string;
   legal_name: string;
   gstin: string | null;
   address: string | null;
@@ -76,6 +81,7 @@ type ProfileRow = {
 
 function mapProfile(row: ProfileRow): BillingProfile {
   return {
+    countryCode: row.country_code,
     legalName: row.legal_name,
     gstin: row.gstin,
     address: row.address,
@@ -99,7 +105,8 @@ export async function getBillingProfile(
   try {
     const [column, id] = "orgId" in owner ? ["org_id", owner.orgId] : ["account_id", owner.accountId];
     const result: QueryResult<ProfileRow> = await db.query(
-      `SELECT legal_name, gstin, address, city, postal_code, state_code FROM billing_profiles WHERE ${column} = $1`,
+      `SELECT country_code, legal_name, gstin, address, city, postal_code, state_code
+       FROM billing_profiles WHERE ${column} = $1`,
       [id]
     );
     return result.rows[0] ? mapProfile(result.rows[0]) : null;
@@ -109,20 +116,25 @@ export async function getBillingProfile(
   }
 }
 
-/** Upsert; the state is taken from the GSTIN when one is given. Validate before calling. */
+/**
+ * Upsert; the state is taken from the GSTIN when one is given. Outside India
+ * there's no GSTIN or state. Validate before calling.
+ */
 export async function saveBillingProfile(owner: ProfileOwner, profile: BillingProfile): Promise<BillingProfile> {
   try {
-    const stateCode = profile.gstin ? profile.gstin.slice(0, 2) : profile.stateCode;
+    const india = profile.countryCode === HOME_COUNTRY;
+    const gstin = india ? profile.gstin : null;
+    const stateCode = !india ? null : gstin ? gstin.slice(0, 2) : profile.stateCode;
     const [column, id] = "orgId" in owner ? ["org_id", owner.orgId] : ["account_id", owner.accountId];
     const result: QueryResult<ProfileRow> = await getPool().query(
-      `INSERT INTO billing_profiles (${column}, legal_name, gstin, address, city, postal_code, state_code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO billing_profiles (${column}, country_code, legal_name, gstin, address, city, postal_code, state_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (${column}) DO UPDATE
-       SET legal_name = EXCLUDED.legal_name, gstin = EXCLUDED.gstin, address = EXCLUDED.address,
-           city = EXCLUDED.city, postal_code = EXCLUDED.postal_code,
+       SET country_code = EXCLUDED.country_code, legal_name = EXCLUDED.legal_name, gstin = EXCLUDED.gstin,
+           address = EXCLUDED.address, city = EXCLUDED.city, postal_code = EXCLUDED.postal_code,
            state_code = EXCLUDED.state_code, updated_at = now()
-       RETURNING legal_name, gstin, address, city, postal_code, state_code`,
-      [id, profile.legalName, profile.gstin, profile.address, profile.city, profile.postalCode, stateCode]
+       RETURNING country_code, legal_name, gstin, address, city, postal_code, state_code`,
+      [id, profile.countryCode, profile.legalName, gstin, profile.address, profile.city, profile.postalCode, stateCode]
     );
     const row = result.rows[0];
     if (!row) throw new Error("billing_profiles upsert returned no row");
@@ -131,6 +143,15 @@ export async function saveBillingProfile(owner: ProfileOwner, profile: BillingPr
     logCaught("billing.invoices.service.saveBillingProfile", error);
     throw error;
   }
+}
+
+/**
+ * Currency a buyer pays in, from the saved billing profile's country — the
+ * account's own, or the organization's. No profile yet = INR (India default).
+ */
+export async function currencyForOwner(owner: ProfileOwner): Promise<BillingCurrency> {
+  const profile = await getBillingProfile(owner);
+  return currencyForCountry(profile?.countryCode);
 }
 
 // ---------------------------------------------------------------------------
@@ -146,22 +167,30 @@ type InvoiceLine = {
   orgId: string | null;
   description: string;
   quantity: number;
+  /** In the minor unit of `currency` (paise / cents). */
   unitAmountPaise: number;
+  /** What the payment was charged in — not the buyer's current country. */
+  currency: BillingCurrency;
 };
 
 /** What a payment was for — read from the purchase / subscription it came from. */
 async function loadInvoiceLine(client: PoolClient, source: InvoiceSource): Promise<InvoiceLine | null> {
   if (source.type === "credit_purchase") {
-    const r: QueryResult<{ account_id: string; org_id: string | null; credits: string; amount: number }> =
-      await client.query(
-        `SELECT account_id::text AS account_id, org_id::text AS org_id, credits,
-                amount_usd_cents AS amount  -- legacy name: holds INR paise for Razorpay purchases
-         FROM credit_purchases WHERE id = $1 AND status = 'succeeded'`,
-        [source.purchaseId]
-      );
+    const r: QueryResult<{
+      account_id: string;
+      org_id: string | null;
+      credits: string;
+      amount: number;
+      currency: BillingCurrency;
+    }> = await client.query(
+      `SELECT account_id::text AS account_id, org_id::text AS org_id, credits, currency,
+              amount_usd_cents AS amount  -- legacy name: minor unit of \`currency\` (paise / cents)
+       FROM credit_purchases WHERE id = $1 AND status = 'succeeded'`,
+      [source.purchaseId]
+    );
     const row = r.rows[0];
     if (!row) return null;
-    const credits = Number(row.credits).toLocaleString("en-IN");
+    const credits = Number(row.credits).toLocaleString(row.currency === "INR" ? "en-IN" : "en-US");
     return {
       accountId: row.account_id,
       orgId: row.org_id,
@@ -170,6 +199,7 @@ async function loadInvoiceLine(client: PoolClient, source: InvoiceSource): Promi
         : `Aikya credits — ${credits} credits`,
       quantity: 1,
       unitAmountPaise: row.amount,
+      currency: row.currency,
     };
   }
 
@@ -179,10 +209,12 @@ async function loadInvoiceLine(client: PoolClient, source: InvoiceSource): Promi
     quantity: number;
     unit_amount_paise: number | null;
     price_inr_paise: number | null;
+    price_usd_cents: number | null;
+    currency: BillingCurrency;
     plan_name: string;
   }> = await client.query(
-    `SELECT g.account_id::text AS grant_account_id, s.org_id::text AS org_id, s.quantity,
-            s.unit_amount_paise, p.price_inr_paise, p.display_name AS plan_name
+    `SELECT g.account_id::text AS grant_account_id, s.org_id::text AS org_id, s.quantity, s.currency,
+            s.unit_amount_paise, p.price_inr_paise, p.price_usd_cents, p.display_name AS plan_name
      FROM subscription_credit_grants g
      JOIN subscriptions s ON s.razorpay_subscription_id = g.razorpay_subscription_id
      JOIN plans p ON p.id = s.plan_id
@@ -190,7 +222,8 @@ async function loadInvoiceLine(client: PoolClient, source: InvoiceSource): Promi
     [source.razorpayPaymentId]
   );
   const row = r.rows[0];
-  const unit = row?.unit_amount_paise ?? row?.price_inr_paise;
+  // unit_amount_paise is in the subscription's currency (cents for USD).
+  const unit = row?.unit_amount_paise ?? (row?.currency === "USD" ? row.price_usd_cents : row?.price_inr_paise);
   if (!row || !unit) return null;
   const quantity = row.org_id ? row.quantity : 1;
   return {
@@ -201,6 +234,7 @@ async function loadInvoiceLine(client: PoolClient, source: InvoiceSource): Promi
       : `Aikya ${row.plan_name} plan — monthly subscription`,
     quantity,
     unitAmountPaise: unit,
+    currency: row.currency,
   };
 }
 
@@ -209,11 +243,15 @@ async function loadInvoiceLine(client: PoolClient, source: InvoiceSource): Promi
  * never throws: invoicing must not break a payment that already succeeded —
  * a failure is logged and can be retried with scripts/backfill-invoices.ts.
  * No-op when the seller isn't configured (admin Invoicing page, or SELLER_* env vars).
+ *
+ * USD payments are exports of services under the seller's LUT: zero-rated (no
+ * GST), place of supply 96. No-op while no LUT number is saved — issuing one
+ * without it would mean IGST is owed; backfill once it's set.
  */
 export async function issueInvoice(source: InvoiceSource): Promise<{ invoiceNumber: string } | null> {
   try {
     // Saved on the admin Invoicing page, with SELLER_* env vars as fallback.
-    const { legalName, gstin, address, sacCode, invoicePrefix } = await getEffectiveSeller();
+    const { legalName, gstin, address, sacCode, invoicePrefix, lutNumber } = await getEffectiveSeller();
     if (!legalName || !gstin || !isValidGstin(gstin)) return null;
 
     return await withPoolTransaction(async (client: PoolClient) => {
@@ -226,6 +264,11 @@ export async function issueInvoice(source: InvoiceSource): Promise<{ invoiceNumb
 
       const line = await loadInvoiceLine(client, source);
       if (!line) return null;
+      const exported = line.currency !== "INR";
+      if (exported && !lutNumber) {
+        logCaught("billing.invoices.service.issueInvoice", new Error(`No LUT number saved — export invoice for ${source.type} ${sourceId} not issued`));
+        return null;
+      }
 
       const profile = await getBillingProfile(line.orgId ? { orgId: line.orgId } : { accountId: line.accountId }, client);
       const account: QueryResult<{ name: string | null; email: string }> = await client.query(
@@ -233,20 +276,28 @@ export async function issueInvoice(source: InvoiceSource): Promise<{ invoiceNumb
         [line.accountId]
       );
       const sellerState = gstin.slice(0, 2);
-      // Place of supply: the buyer's state if known, otherwise the seller's (unregistered buyer, no address).
-      const placeOfSupply = profile?.gstin?.slice(0, 2) ?? profile?.stateCode ?? sellerState;
+      // Place of supply: 96 for exports; else the buyer's state if known, otherwise the
+      // seller's (unregistered buyer, no address).
+      const placeOfSupply = exported
+        ? EXPORT_PLACE_OF_SUPPLY
+        : (profile?.gstin?.slice(0, 2) ?? profile?.stateCode ?? sellerState);
+      const buyerCountry = profile?.countryCode ?? HOME_COUNTRY;
       const buyer = {
         legalName: profile?.legalName ?? account.rows[0]?.name ?? account.rows[0]?.email ?? "Customer",
-        gstin: profile?.gstin ?? null,
+        gstin: exported ? null : (profile?.gstin ?? null),
         address: profile ? formatBillingAddress(profile) : null,
         stateCode: placeOfSupply,
-        stateName: stateName(placeOfSupply),
+        stateName: exported ? null : stateName(placeOfSupply),
+        countryCode: buyerCountry,
+        countryName: countryName(buyerCountry),
         email: account.rows[0]?.email ?? null,
       };
       const seller = { legalName, gstin, address: address ?? null, stateCode: sellerState, stateName: stateName(sellerState) };
 
       const totalPaise = line.unitAmountPaise * line.quantity;
-      const split = splitInclusiveGst(totalPaise, sellerState, placeOfSupply);
+      const split: GstSplit = exported
+        ? { taxablePaise: totalPaise, cgstPaise: 0, sgstPaise: 0, igstPaise: 0 }
+        : splitInclusiveGst(totalPaise, sellerState, placeOfSupply);
 
       // Consecutive numbering per financial year; the row lock serializes concurrent issuers.
       const fy = financialYearTag(new Date());
@@ -264,8 +315,8 @@ export async function issueInvoice(source: InvoiceSource): Promise<{ invoiceNumb
         `INSERT INTO invoices (
            invoice_number, account_id, org_id, source_type, source_id, description, quantity,
            unit_amount_paise, total_paise, taxable_paise, cgst_paise, sgst_paise, igst_paise,
-           gst_rate_bp, sac_code, place_of_supply, seller, buyer
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+           gst_rate_bp, sac_code, place_of_supply, seller, buyer, currency, lut_number
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
         [
           invoiceNumber,
           line.accountId,
@@ -280,11 +331,13 @@ export async function issueInvoice(source: InvoiceSource): Promise<{ invoiceNumb
           split.cgstPaise,
           split.sgstPaise,
           split.igstPaise,
-          GST_RATE_BP,
+          exported ? 0 : GST_RATE_BP,
           sacCode ?? null,
           placeOfSupply,
           JSON.stringify(seller),
           JSON.stringify(buyer),
+          line.currency,
+          exported ? lutNumber : null,
         ]
       );
       return { invoiceNumber };
@@ -316,6 +369,9 @@ export type InvoiceRow = {
   gst_rate_bp: number;
   sac_code: string | null;
   place_of_supply: string;
+  currency: BillingCurrency;
+  /** Set on export (USD) invoices: the LUT they were issued under. */
+  lut_number: string | null;
   seller: { legalName: string; gstin: string; address: string | null; stateCode: string; stateName: string | null };
   buyer: {
     legalName: string;
@@ -323,13 +379,16 @@ export type InvoiceRow = {
     address: string | null;
     stateCode: string;
     stateName: string | null;
+    /** Missing on invoices issued before USD checkout (= India). */
+    countryCode?: string;
+    countryName?: string;
     email: string | null;
   };
 };
 
 const INVOICE_COLUMNS = `id::text AS id, invoice_number, account_id::text AS account_id, org_id::text AS org_id,
   issued_at, description, quantity, unit_amount_paise, total_paise, taxable_paise, cgst_paise,
-  sgst_paise, igst_paise, gst_rate_bp, sac_code, place_of_supply, seller, buyer`;
+  sgst_paise, igst_paise, gst_rate_bp, sac_code, place_of_supply, seller, buyer, currency, lut_number`;
 
 /** The caller's personal invoices plus, for org admins, the org's invoices. */
 export async function listInvoices(accountId: string, adminOfOrgId: string | null): Promise<InvoiceRow[]> {

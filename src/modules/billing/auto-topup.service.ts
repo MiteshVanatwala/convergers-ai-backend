@@ -6,6 +6,7 @@ import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
 import { logCaught } from "../../shared/utils/log";
 import { BillingError, type CreatedPurchaseOrder } from "./billing.service";
 import { findCreditPackage } from "./credit-packages";
+import { currencyForOwner } from "./invoices.service";
 import { getRazorpayClient, requireRazorpayKeyId } from "./razorpay-client";
 
 /**
@@ -96,6 +97,13 @@ export async function startAutoTopUpSetup(input: {
   }
 
   try {
+    // Saved-card charges are INR only (card mandates); USD buyers buy packs one at a time.
+    if ((await currencyForOwner({ accountId: input.accountId })) !== "INR") {
+      throw new BillingError(
+        "Auto top-up is only available for billing addresses in India. Buy a credit pack instead.",
+        "validation"
+      );
+    }
     const razorpay = getRazorpayClient();
     const existing = await loadSettings(input.accountId);
     // fail_existing 0 returns the existing customer for this email/contact instead of erroring.

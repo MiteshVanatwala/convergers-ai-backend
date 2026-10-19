@@ -6,7 +6,8 @@ import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
 import { logCaught } from "../../shared/utils/log";
 import * as plansService from "../plans/plans.service";
 import { getRazorpayClient, requireRazorpayKeyId, requireRazorpayKeySecret } from "./razorpay-client";
-import { issueInvoice } from "./invoices.service";
+import type { BillingCurrency } from "./currency";
+import { currencyForOwner, issueInvoice } from "./invoices.service";
 import { sendPlanChangeEmail, sendTeamPlanEmail } from "../notifications/account-emails";
 
 export type SubscriptionErrorKind = "validation" | "not_found";
@@ -33,21 +34,30 @@ export type CreatedSubscriptionOrder = {
 };
 
 /**
- * Returns the Razorpay Plan for a plan key, creating it on first use. The
- * charge amount comes from plans.price_inr_paise; if that changed since the
- * memoized Razorpay Plan was created, a new Razorpay Plan is created (existing
- * subscriptions keep billing at their original plan's amount).
+ * Returns the Razorpay Plan for a plan key in one currency, creating it on
+ * first use. The charge amount comes from plans.price_inr_paise (INR) or
+ * plans.price_usd_cents (USD); if that changed since the memoized Razorpay
+ * Plan was created, a new Razorpay Plan is created (existing subscriptions
+ * keep billing at their original plan's amount). Razorpay Plans are
+ * single-currency, so each currency has its own memoized plan.
  */
-async function ensureRazorpayPlanForKey(planKey: string): Promise<{ planId: string; amountPaise: number }> {
+async function ensureRazorpayPlanForKey(
+  planKey: string,
+  currency: BillingCurrency
+): Promise<{ planId: string; amount: number }> {
   const pool = getPool();
   const existing: QueryResult<{
     id: number | string;
     razorpay_plan_id: string | null;
     razorpay_plan_amount_paise: number | null;
+    razorpay_plan_id_usd: string | null;
+    razorpay_plan_amount_usd_cents: number | null;
     price_inr_paise: number | null;
+    price_usd_cents: number | null;
     display_name: string;
   }> = await pool.query(
-    `SELECT id, razorpay_plan_id, razorpay_plan_amount_paise, price_inr_paise, display_name
+    `SELECT id, razorpay_plan_id, razorpay_plan_amount_paise, razorpay_plan_id_usd, razorpay_plan_amount_usd_cents,
+            price_inr_paise, price_usd_cents, display_name
      FROM plans WHERE key = $1`,
     [planKey]
   );
@@ -58,34 +68,42 @@ async function ensureRazorpayPlanForKey(planKey: string): Promise<{ planId: stri
   if (planKey !== "pro" && planKey !== "team") {
     throw new SubscriptionError(`"${planKey}" isn't set up for subscription checkout`, "validation");
   }
-  if (!row.price_inr_paise || row.price_inr_paise <= 0) {
-    throw new Error(`Plan "${planKey}" has no INR price — apply db/pricing_v2.sql`);
+  const usd = currency === "USD";
+  const price = usd ? row.price_usd_cents : row.price_inr_paise;
+  if (!price || price <= 0) {
+    throw new Error(`Plan "${planKey}" has no ${currency} price — apply db/${usd ? "currency_v1" : "pricing_v2"}.sql`);
   }
-  if (row.razorpay_plan_id && row.razorpay_plan_amount_paise === row.price_inr_paise) {
-    return { planId: row.razorpay_plan_id, amountPaise: row.price_inr_paise };
+  const memoId = usd ? row.razorpay_plan_id_usd : row.razorpay_plan_id;
+  const memoAmount = usd ? row.razorpay_plan_amount_usd_cents : row.razorpay_plan_amount_paise;
+  if (memoId && memoAmount === price) {
+    return { planId: memoId, amount: price };
   }
 
   const plan = await getRazorpayClient().plans.create({
     period: "monthly",
     interval: 1,
     item: {
-      name: `${row.display_name} (monthly)`,
-      amount: row.price_inr_paise,
-      currency: "INR",
+      name: `${row.display_name} (monthly${usd ? ", USD" : ""})`,
+      amount: price,
+      currency,
     },
   });
 
   await pool.query(
-    `UPDATE plans SET razorpay_plan_id = $2, razorpay_plan_amount_paise = $3 WHERE key = $1`,
-    [planKey, plan.id, row.price_inr_paise]
+    usd
+      ? `UPDATE plans SET razorpay_plan_id_usd = $2, razorpay_plan_amount_usd_cents = $3 WHERE key = $1`
+      : `UPDATE plans SET razorpay_plan_id = $2, razorpay_plan_amount_paise = $3 WHERE key = $1`,
+    [planKey, plan.id, price]
   );
-  return { planId: plan.id, amountPaise: row.price_inr_paise };
+  return { planId: plan.id, amount: price };
 }
 
 /** Starts a Pro upgrade: creates the Razorpay Subscription and records it as `pending`. */
 export async function createProSubscription(accountId: string): Promise<CreatedSubscriptionOrder> {
   try {
-    const { planId, amountPaise } = await ensureRazorpayPlanForKey("pro");
+    // The payer's billing country decides the currency (outside India → USD).
+    const currency = await currencyForOwner({ accountId });
+    const { planId, amount } = await ensureRazorpayPlanForKey("pro", currency);
     const proPlanRow: QueryResult<{ id: number | string }> = await getPool().query(
       `SELECT id FROM plans WHERE key = 'pro'`
     );
@@ -101,10 +119,11 @@ export async function createProSubscription(accountId: string): Promise<CreatedS
       notes: { accountId },
     });
 
+    // unit_amount_paise holds the minor unit of `currency` (cents for USD).
     await getPool().query(
-      `INSERT INTO subscriptions (account_id, plan_id, razorpay_subscription_id, status, unit_amount_paise)
-       VALUES ($1, $2, $3, 'pending', $4)`,
-      [accountId, proPlanId, subscription.id, amountPaise]
+      `INSERT INTO subscriptions (account_id, plan_id, razorpay_subscription_id, status, unit_amount_paise, currency)
+       VALUES ($1, $2, $3, 'pending', $4, $5)`,
+      [accountId, proPlanId, subscription.id, amount, currency]
     );
 
     return { subscriptionId: subscription.id, keyId: requireRazorpayKeyId() };
@@ -121,8 +140,14 @@ export const MAX_TEAM_SEATS = 500;
  * Starts a Team plan for an organization: a Razorpay Subscription billed per
  * seat (quantity), recorded as `pending` on the org. Each successful charge
  * later adds included_credits × seats to the org pool (grantSubscriptionCredits).
+ * `currency` comes from the billing country on the checkout form (the org's
+ * billing details are saved right after, so they can't be read yet).
  */
-export async function createTeamSubscription(orgId: string, seats: number): Promise<CreatedSubscriptionOrder> {
+export async function createTeamSubscription(
+  orgId: string,
+  seats: number,
+  currency: BillingCurrency
+): Promise<CreatedSubscriptionOrder> {
   try {
     if (!Number.isInteger(seats) || seats < 1 || seats > MAX_TEAM_SEATS) {
       throw new SubscriptionError(`Seats must be between 1 and ${MAX_TEAM_SEATS}.`, "validation");
@@ -136,7 +161,7 @@ export async function createTeamSubscription(orgId: string, seats: number): Prom
       throw new SubscriptionError("This organization already has an active Team plan.", "validation");
     }
 
-    const { planId, amountPaise } = await ensureRazorpayPlanForKey("team");
+    const { planId, amount } = await ensureRazorpayPlanForKey("team", currency);
     const teamRow: QueryResult<{ id: number | string }> = await pool.query(
       `SELECT id FROM plans WHERE key = 'team'`
     );
@@ -154,9 +179,9 @@ export async function createTeamSubscription(orgId: string, seats: number): Prom
     });
 
     await pool.query(
-      `INSERT INTO subscriptions (org_id, plan_id, razorpay_subscription_id, status, quantity, unit_amount_paise)
-       VALUES ($1, $2, $3, 'pending', $4, $5)`,
-      [orgId, teamPlanId, subscription.id, seats, amountPaise]
+      `INSERT INTO subscriptions (org_id, plan_id, razorpay_subscription_id, status, quantity, unit_amount_paise, currency)
+       VALUES ($1, $2, $3, 'pending', $4, $5, $6)`,
+      [orgId, teamPlanId, subscription.id, seats, amount, currency]
     );
 
     return { subscriptionId: subscription.id, keyId: requireRazorpayKeyId() };

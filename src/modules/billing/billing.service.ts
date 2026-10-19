@@ -9,8 +9,8 @@ import { withPoolTransaction } from "../../infrastructure/db/with-transaction";
 import { logCaught } from "../../shared/utils/log";
 import { LedgerReason, LedgerReferenceType } from "../../config/ledger-reasons";
 import { getRazorpayClient, requireRazorpayKeyId, requireRazorpayKeySecret } from "./razorpay-client";
-import { findCreditPackage } from "./credit-packages";
-import { issueInvoice } from "./invoices.service";
+import { findCreditPackage, packageAmount, packageLabel } from "./credit-packages";
+import { currencyForOwner, issueInvoice } from "./invoices.service";
 
 export type BillingErrorKind = "validation" | "not_found";
 
@@ -45,26 +45,30 @@ export async function createPurchaseOrder(input: {
   }
 
   try {
+    // The payer's billing country decides the currency (outside India → USD).
+    const currency = await currencyForOwner(input.orgId ? { orgId: input.orgId } : { accountId: input.accountId });
+    const amount = packageAmount(pkg, currency);
     const order = await getRazorpayClient().orders.create({
-      amount: pkg.amountInrPaise,
-      currency: "INR",
+      amount,
+      currency,
       receipt: randomUUID().slice(0, 40),
       notes: { accountId: input.accountId, packageId: pkg.id, ...(input.orgId ? { orgId: input.orgId } : {}) },
     });
 
     const pool = getPool();
+    // amount_usd_cents is a legacy name: it holds the minor unit of `currency` (paise or cents).
     await pool.query(
-      `INSERT INTO credit_purchases (account_id, org_id, razorpay_order_id, credits, amount_usd_cents, status)
-       VALUES ($1, $2, $3, $4, $5, 'pending')`,
-      [input.accountId, input.orgId ?? null, order.id, pkg.credits, pkg.amountInrPaise]
+      `INSERT INTO credit_purchases (account_id, org_id, razorpay_order_id, credits, amount_usd_cents, currency, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
+      [input.accountId, input.orgId ?? null, order.id, pkg.credits, amount, currency]
     );
 
     return {
       orderId: order.id,
-      amountPaise: pkg.amountInrPaise,
-      currency: "INR",
+      amountPaise: amount,
+      currency,
       keyId: requireRazorpayKeyId(),
-      packageLabel: pkg.label,
+      packageLabel: packageLabel(pkg, currency),
     };
   } catch (error: unknown) {
     if (error instanceof BillingError) throw error;

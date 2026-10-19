@@ -16,6 +16,8 @@ export type SellerConfig = {
   address: string | undefined;
   sacCode: string | undefined;
   invoicePrefix: string;
+  /** Letter of Undertaking (ARN) for zero-rated exports — required to invoice USD sales. */
+  lutNumber: string | undefined;
 };
 
 export type SellerSettingsInput = {
@@ -24,6 +26,7 @@ export type SellerSettingsInput = {
   address: string | null;
   sacCode: string | null;
   invoicePrefix: string | null;
+  lutNumber: string | null;
 };
 
 type Row = {
@@ -32,6 +35,7 @@ type Row = {
   address: string | null;
   sac_code: string | null;
   invoice_prefix: string | null;
+  lut_number: string | null;
   updated_at: Date;
 };
 
@@ -44,7 +48,7 @@ async function readRow(): Promise<{ tableReady: boolean; row: Row | null }> {
   );
   if (!exists.rows[0]?.ok) return { tableReady: false, row: null };
   const result: QueryResult<Row> = await getPool().query(
-    `SELECT legal_name, gstin, address, sac_code, invoice_prefix, updated_at FROM seller_settings WHERE id`
+    `SELECT legal_name, gstin, address, sac_code, invoice_prefix, lut_number, updated_at FROM seller_settings WHERE id`
   );
   return { tableReady: true, row: result.rows[0] ?? null };
 }
@@ -60,6 +64,8 @@ export async function getEffectiveSeller(): Promise<SellerConfig> {
       address: row?.address ?? env.address,
       sacCode: row?.sac_code ?? env.sacCode,
       invoicePrefix: row?.invoice_prefix ?? (env.invoicePrefix || DEFAULT_PREFIX),
+      // No env fallback: the LUT is renewed every financial year, so it's set on the Invoicing page.
+      lutNumber: row?.lut_number ?? undefined,
     };
   } catch (error: unknown) {
     logCaught("billing.seller-settings.service.getEffectiveSeller", error);
@@ -85,9 +91,10 @@ export async function getSellerSettingsView(): Promise<{
             address: row.address,
             sacCode: row.sac_code,
             invoicePrefix: row.invoice_prefix,
+            lutNumber: row.lut_number,
           }
         : null,
-      env: loadEnv().seller,
+      env: { ...loadEnv().seller, lutNumber: undefined },
       effective: await getEffectiveSeller(),
       updatedAt: row?.updated_at.toISOString() ?? null,
       tableReady,
@@ -103,13 +110,13 @@ export async function saveSellerSettings(input: SellerSettingsInput, adminUserId
   try {
     await withPoolTransaction(async (client: PoolClient) => {
       await client.query(
-        `INSERT INTO seller_settings (id, legal_name, gstin, address, sac_code, invoice_prefix, updated_at, updated_by)
-         VALUES (true, $1, $2, $3, $4, $5, now(), $6)
+        `INSERT INTO seller_settings (id, legal_name, gstin, address, sac_code, invoice_prefix, lut_number, updated_at, updated_by)
+         VALUES (true, $1, $2, $3, $4, $5, $6, now(), $7)
          ON CONFLICT (id) DO UPDATE
          SET legal_name = EXCLUDED.legal_name, gstin = EXCLUDED.gstin, address = EXCLUDED.address,
              sac_code = EXCLUDED.sac_code, invoice_prefix = EXCLUDED.invoice_prefix,
-             updated_at = now(), updated_by = EXCLUDED.updated_by`,
-        [input.legalName, input.gstin, input.address, input.sacCode, input.invoicePrefix, adminUserId]
+             lut_number = EXCLUDED.lut_number, updated_at = now(), updated_by = EXCLUDED.updated_by`,
+        [input.legalName, input.gstin, input.address, input.sacCode, input.invoicePrefix, input.lutNumber, adminUserId]
       );
       await appendAdminAudit(
         {

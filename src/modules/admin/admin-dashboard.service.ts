@@ -15,6 +15,8 @@ export type DashboardRange = "1h" | "24h" | "7d";
 
 /** Rough rate for showing provider cost (USD) next to revenue (INR); labelled as approximate in the UI. */
 export const APPROX_INR_PER_USD = 88;
+/** An invoice's total in INR paise; USD invoices (cents) converted at $3 = APPROX_INR_PER_USD. */
+const INR_PAISE_SQL = "CASE WHEN currency = 'USD' THEN total_paise * $3 ELSE total_paise END";
 const TZ = "Asia/Kolkata";
 
 const RANGES: Record<DashboardRange, { window: string; bucket: "minute" | "hour" | "day"; span: string; step: string }> = {
@@ -171,17 +173,18 @@ export async function getDashboardSnapshot(range: DashboardRange): Promise<Dashb
            GROUP BY task_type ORDER BY requests DESC`,
           [cfg.window]
         ),
-        // Revenue = GST invoices issued (every successful payment gets one).
+        // Revenue = GST invoices issued (every successful payment gets one). USD invoices
+        // (cents) are folded in at the approximate rate: cents × INR-per-USD = paise.
         pool.query(
           `SELECT
-             coalesce(sum(total_paise) FILTER (WHERE issued_at >= now() - $1::interval), 0) AS cur,
-             coalesce(sum(total_paise) FILTER (WHERE issued_at < now() - $1::interval), 0) AS prev,
-             (SELECT coalesce(sum(total_paise), 0) FROM invoices
+             coalesce(sum(${INR_PAISE_SQL}) FILTER (WHERE issued_at >= now() - $1::interval), 0) AS cur,
+             coalesce(sum(${INR_PAISE_SQL}) FILTER (WHERE issued_at < now() - $1::interval), 0) AS prev,
+             (SELECT coalesce(sum(${INR_PAISE_SQL}), 0) FROM invoices
                WHERE issued_at >= date_trunc('month', now(), $2)) AS mtd,
              (SELECT coalesce(sum(native_cost), 0) FROM usage_events
                WHERE created_at >= date_trunc('month', now(), $2)) AS cost_mtd
            FROM invoices WHERE issued_at >= now() - 2 * $1::interval`,
-          [cfg.window, TZ]
+          [cfg.window, TZ, APPROX_INR_PER_USD]
         ),
         pool.query(
           `SELECT count(*) FILTER (WHERE created_at >= now() - $1::interval) AS cur,
@@ -194,13 +197,18 @@ export async function getDashboardSnapshot(range: DashboardRange): Promise<Dashb
              (SELECT count(*) FROM accounts WHERE status = 'active') AS total_users,
              (SELECT count(*) FROM accounts WHERE created_at >= now() - interval '7 days') AS new_users_7d,
              (SELECT count(*) FROM subscriptions WHERE status = 'active') AS paying,
-             (SELECT coalesce(sum(coalesce(s.unit_amount_paise, p.price_inr_paise, 0) * coalesce(s.quantity, 1)), 0)
+             (SELECT coalesce(sum(
+                       CASE WHEN s.currency = 'USD'
+                            THEN coalesce(s.unit_amount_paise, p.price_usd_cents, 0) * $1
+                            ELSE coalesce(s.unit_amount_paise, p.price_inr_paise, 0) END
+                       * coalesce(s.quantity, 1)), 0)
                 FROM subscriptions s LEFT JOIN plans p ON p.id = s.plan_id WHERE s.status = 'active') AS mrr,
              (SELECT count(*) FROM organizations) AS orgs,
              (SELECT coalesce(sum(seats), 0) FROM organizations) AS seats,
              (SELECT coalesce(sum(balance), 0) FROM credit_wallets)
                + (SELECT coalesce(sum(balance), 0) FROM org_credit_wallets) AS wallet,
-             (SELECT count(*) FROM auto_topup_settings WHERE status = 'active') AS auto_topup`
+             (SELECT count(*) FROM auto_topup_settings WHERE status = 'active') AS auto_topup`,
+          [APPROX_INR_PER_USD]
         ),
         pool.query(
           `SELECT p.display_name AS plan, count(*) AS accounts
@@ -223,7 +231,7 @@ export async function getDashboardSnapshot(range: DashboardRange): Promise<Dashb
               ORDER BY created_at DESC LIMIT 10)
              UNION ALL
              (SELECT 'purchase', 'p' || cp.id, cp.created_at, cp.status, cp.source, cp.failure_reason,
-                     cp.amount_usd_cents::text, a.email::text, cp.org_id IS NOT NULL
+                     cp.currency || ':' || cp.amount_usd_cents, a.email::text, cp.org_id IS NOT NULL
               FROM credit_purchases cp LEFT JOIN accounts a ON a.id = cp.account_id
               WHERE cp.created_at >= now() - interval '30 days' AND cp.status <> 'pending'
               ORDER BY cp.created_at DESC LIMIT 10)
@@ -526,7 +534,12 @@ function toFeedItem(r: FeedRow): DashboardSnapshot["feed"][number] {
       return { ...base, title: "New sign-up", detail: `${who} · ${r.a ?? ""}`, tone: "good" };
     case "purchase": {
       const ok = r.a === "succeeded";
-      const amount = `₹${(n(r.d) / 100).toLocaleString("en-IN")}`;
+      // d = "<currency>:<minor units>" (amount_usd_cents holds paise for INR, cents for USD).
+      const [currency, minor] = (r.d ?? "INR:0").split(":");
+      const amount =
+        currency === "USD"
+          ? `$${(n(minor) / 100).toLocaleString("en-US", { minimumFractionDigits: 2 })}`
+          : `₹${(n(minor) / 100).toLocaleString("en-IN")}`;
       const what = r.b === "auto_topup" ? "Auto top-up" : r.flag ? "Shared credits" : "Credit pack";
       return {
         ...base,

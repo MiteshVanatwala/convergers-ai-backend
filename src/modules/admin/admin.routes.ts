@@ -8,6 +8,7 @@ import {
 } from "../../infrastructure/http/middleware/admin-rate-limit";
 import { AdminPermission } from "./admin-permissions";
 import * as setupController from "./admin-setup.controller";
+import * as pricingController from "./admin-pricing.controller";
 import * as invoicingController from "./admin-invoicing.controller";
 import * as adminController from "./admin.controller";
 import * as adminAuthController from "./admin-auth.controller";
@@ -185,6 +186,15 @@ export function registerAdminRoutes(app: FastifyInstance): void {
 
     adminApp.get("/admin/setup", { preHandler: requireViewProviderHealth }, (request, reply) =>
       setupController.getSetup(request, reply)
+    );
+
+    adminApp.get("/admin/pricing", { preHandler: requireViewProviderHealth }, (request, reply) =>
+      pricingController.getPricing(request, reply)
+    );
+    adminApp.get<{ Querystring: { range?: string } }>(
+      "/admin/pricing/profit",
+      { preHandler: requireViewDashboard },
+      (request, reply) => pricingController.getProfit(request, reply)
     );
 
     adminApp.get("/admin/settings/invoicing", { preHandler: requireManagePlans }, (request, reply) =>

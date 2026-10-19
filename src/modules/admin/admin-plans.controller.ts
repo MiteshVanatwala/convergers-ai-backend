@@ -27,6 +27,7 @@ export async function listPlans(request: FastifyRequest, reply: FastifyReply) {
 type UpdatePlanBody = {
   displayName?: string;
   priceUsdCents?: number | null;
+  priceInrPaise?: number | null;
   includedCredits?: number | null;
   rateLimitRpm?: number | null;
   tagline?: string | null;
@@ -69,6 +70,7 @@ export async function updatePlan(
       key: request.params.key,
       displayName: body.displayName,
       priceUsdCents: body.priceUsdCents ?? null,
+      priceInrPaise: body.priceInrPaise,
       includedCredits: body.includedCredits ?? null,
       rateLimitRpm: body.rateLimitRpm ?? null,
       tagline: body.tagline ?? null,

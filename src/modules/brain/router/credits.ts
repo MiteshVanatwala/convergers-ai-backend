@@ -10,13 +10,13 @@ import { INSUFFICIENT_CREDITS_CODE, UserFacingError } from "./errors";
 export const BYOK_FEE_CREDITS = 25;
 
 /** Below this, an answer would be too short to be useful — try a cheaper model instead. */
-const MIN_AFFORDABLE_OUTPUT_TOKENS = 500;
+export const MIN_AFFORDABLE_OUTPUT_TOKENS = 500;
 
 // Deliberately conservative (real English averages ~4 chars/token) so the
 // estimate errs toward reserving too much, not too little.
-const CHARS_PER_TOKEN = 3.5;
+export const CHARS_PER_TOKEN = 3.5;
 // Adapter system prompt + message framing, not visible in the request itself.
-const PROMPT_OVERHEAD_TOKENS = 200;
+export const PROMPT_OVERHEAD_TOKENS = 200;
 
 export type AttemptPlan = {
   /** Runs on the account's own key — charged BYOK_FEE_CREDITS, not model cost. */

@@ -12,8 +12,11 @@ const esc = (value: string | number | null | undefined): string =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
-const inr = (paise: number): string =>
-  `₹${(paise / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+/** Amounts are in the invoice currency's minor unit (paise / cents). */
+const money = (minor: number, currency: InvoiceRow["currency"]): string =>
+  currency === "USD"
+    ? `US$${(minor / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : `₹${(minor / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const pct = (bp: number): string => `${(bp / 100).toFixed(bp % 100 === 0 ? 0 : 2)}%`;
 
@@ -22,12 +25,17 @@ function formatIssuedAt(date: Date): string {
 }
 
 export function renderInvoiceHtml(inv: InvoiceRow): string {
+  const inr = (minor: number) => money(minor, inv.currency);
+  // USD invoices are exports of services under LUT: zero-rated, no GST.
+  const exported = inv.currency !== "INR";
   const intraState = inv.igst_paise === 0 && (inv.cgst_paise > 0 || inv.sgst_paise > 0);
   const half = inv.gst_rate_bp / 2;
   const taxRows = intraState
     ? `<tr><td>CGST @ ${pct(half)}</td><td class="num">${inr(inv.cgst_paise)}</td></tr>
        <tr><td>SGST @ ${pct(half)}</td><td class="num">${inr(inv.sgst_paise)}</td></tr>`
-    : `<tr><td>IGST @ ${pct(inv.gst_rate_bp)}</td><td class="num">${inr(inv.igst_paise)}</td></tr>`;
+    : exported
+      ? `<tr><td>IGST @ 0% (export under LUT)</td><td class="num">${inr(0)}</td></tr>`
+      : `<tr><td>IGST @ ${pct(inv.gst_rate_bp)}</td><td class="num">${inr(inv.igst_paise)}</td></tr>`;
 
   const party = (label: string, p: InvoiceRow["seller"] | InvoiceRow["buyer"]) => `
     <div class="party">
@@ -35,7 +43,8 @@ export function renderInvoiceHtml(inv: InvoiceRow): string {
       <div class="name">${esc(p.legalName)}</div>
       ${p.address ? `<div>${esc(p.address).replace(/\n/g, "<br>")}</div>` : ""}
       ${p.stateName ? `<div>State: ${esc(p.stateName)} (${esc(p.stateCode)})</div>` : ""}
-      ${p.gstin ? `<div>GSTIN: <strong>${esc(p.gstin)}</strong></div>` : `<div>Unregistered</div>`}
+      ${"countryName" in p && p.countryName && p.countryCode !== "IN" ? `<div>Country: ${esc(p.countryName)}</div>` : ""}
+      ${p.gstin ? `<div>GSTIN: <strong>${esc(p.gstin)}</strong></div>` : exported && p === inv.buyer ? "" : `<div>Unregistered</div>`}
     </div>`;
 
   return `<!doctype html>
@@ -78,7 +87,8 @@ export function renderInvoiceHtml(inv: InvoiceRow): string {
     <div class="right">
       <div>Invoice no. <strong>${esc(inv.invoice_number)}</strong></div>
       <div>Date: ${esc(formatIssuedAt(inv.issued_at))}</div>
-      <div>Place of supply: ${esc(inv.buyer.stateName ?? inv.place_of_supply)} (${esc(inv.place_of_supply)})</div>
+      <div>Place of supply: ${esc(exported ? "Outside India" : (inv.buyer.stateName ?? inv.place_of_supply))} (${esc(inv.place_of_supply)})</div>
+      ${exported ? `<div>Currency: USD</div>` : ""}
     </div>
   </div>
 
@@ -89,7 +99,7 @@ export function renderInvoiceHtml(inv: InvoiceRow): string {
 
   <table>
     <thead>
-      <tr><th>Description</th><th>SAC</th><th class="num">Qty</th><th class="num">Rate (incl. GST)</th><th class="num">Amount</th></tr>
+      <tr><th>Description</th><th>SAC</th><th class="num">Qty</th><th class="num">${exported ? "Rate" : "Rate (incl. GST)"}</th><th class="num">Amount</th></tr>
     </thead>
     <tbody>
       <tr>
@@ -109,7 +119,11 @@ export function renderInvoiceHtml(inv: InvoiceRow): string {
   </table>
 
   <div class="notes">
-    Amounts include GST at ${pct(inv.gst_rate_bp)}. Tax is not payable on reverse charge basis.<br>
+    ${
+      exported
+        ? `Supply meant for export under LUT without payment of IGST${inv.lut_number ? ` (LUT ARN: ${esc(inv.lut_number)})` : ""}.<br>`
+        : `Amounts include GST at ${pct(inv.gst_rate_bp)}. Tax is not payable on reverse charge basis.<br>`
+    }
     Paid online via Razorpay. This is a computer-generated invoice.
   </div>
   <div class="sign">For ${esc(inv.seller.legalName)}<br><br>Authorised signatory</div>

@@ -16,6 +16,7 @@ type Body = {
   address?: string | null;
   sacCode?: string | null;
   invoicePrefix?: string | null;
+  lutNumber?: string | null;
 };
 
 /** Blank → null (falls back to the env var). */
@@ -61,6 +62,7 @@ export async function saveInvoicing(request: FastifyRequest<{ Body: Body }>, rep
     const address = typeof body.address === "string" && body.address.trim() ? body.address.trim().slice(0, 500) : null;
     const sacCode = clean(body.sacCode, 8);
     const invoicePrefix = clean(body.invoicePrefix, 4)?.toUpperCase() ?? null;
+    const lutNumber = clean(body.lutNumber, 20)?.toUpperCase().replace(/\s/g, "") ?? null;
 
     if (gstin && !isValidGstin(gstin)) {
       return fail(reply, AppStatus.ADMIN_INVOICING_VALIDATION_FAILED, "GSTIN should be 15 characters, e.g. 27ABCDE1234F1Z5.", 400);
@@ -80,7 +82,16 @@ export async function saveInvoicing(request: FastifyRequest<{ Body: Body }>, rep
       );
     }
 
-    await sellerSettings.saveSellerSettings({ legalName, gstin, address, sacCode, invoicePrefix }, admin.id);
+    if (lutNumber && !/^[A-Z0-9/-]{6,20}$/.test(lutNumber)) {
+      return fail(
+        reply,
+        AppStatus.ADMIN_INVOICING_VALIDATION_FAILED,
+        "LUT number: the ARN from the GST portal, e.g. AD270326012345X.",
+        400
+      );
+    }
+
+    await sellerSettings.saveSellerSettings({ legalName, gstin, address, sacCode, invoicePrefix, lutNumber }, admin.id);
     return ok(reply, AppStatus.ADMIN_INVOICING_SAVED, await view());
   } catch (error: unknown) {
     logCaught("admin.invoicing.controller.saveInvoicing", error);

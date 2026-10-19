@@ -1,5 +1,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { PAYMENTS_UNAVAILABLE_MESSAGE, isPaymentsUnavailable } from "../billing/razorpay-client";
+import { currencyForCountry, isCountryCode } from "../billing/currency";
+import { currencyForOwner } from "../billing/invoices.service";
 import { AppStatus } from "../../config/app-status-codes";
 import { requireSession } from "../../infrastructure/http/middleware/require-session";
 import { fail, ok } from "../../shared/http/api-response";
@@ -422,12 +424,16 @@ export async function updateSettings(
  * POST /v1/billing/subscriptions/:id/verify, same as Pro.
  */
 export async function startSubscription(
-  request: FastifyRequest<{ Body: { seats?: number; orgName?: string } }>,
+  request: FastifyRequest<{ Body: { seats?: number; orgName?: string; countryCode?: string } }>,
   reply: FastifyReply
 ) {
   const account = await requireSession(request, reply);
   if (!account) return;
   try {
+    const countryCode = request.body?.countryCode;
+    if (countryCode !== undefined && !isCountryCode(countryCode)) {
+      return fail(reply, AppStatus.ORG_VALIDATION_FAILED, "Unknown billing country.", 400);
+    }
     let membership = await orgsService.getMembership(account.id);
     if (!membership) {
       // Buying Team from the pricing page without an org: create it (caller = owner)
@@ -456,7 +462,11 @@ export async function startSubscription(
         400
       );
     }
-    const result = await createTeamSubscription(membership.orgId, seats);
+    // The checkout form's country (its billing details are saved after this); else the org's saved one.
+    const currency = countryCode
+      ? currencyForCountry(countryCode)
+      : await currencyForOwner({ orgId: membership.orgId });
+    const result = await createTeamSubscription(membership.orgId, seats, currency);
     return ok(reply, AppStatus.ORG_UPDATED, result, 201);
   } catch (error: unknown) {
     if (error instanceof SubscriptionError) {

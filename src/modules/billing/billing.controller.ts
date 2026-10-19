@@ -9,7 +9,9 @@ import { getPool } from "../../infrastructure/db/pool";
 import { requireSession } from "../../infrastructure/http/middleware/require-session";
 import { fail, ok } from "../../shared/http/api-response";
 import { logCaught } from "../../shared/utils/log";
+import { HOME_COUNTRY } from "@convergers-ai/shared-types";
 import { CREDIT_PACKAGES } from "./credit-packages";
+import { isCountryCode } from "./currency";
 import {
   PAYMENTS_UNAVAILABLE_MESSAGE,
   isPaymentsUnavailable,
@@ -533,6 +535,7 @@ export async function getProfile(
 export async function saveProfile(
   request: FastifyRequest<{
     Body: ProfileTarget & {
+      countryCode?: string;
       legalName?: string;
       gstin?: string | null;
       address?: string | null;
@@ -550,22 +553,36 @@ export async function saveProfile(
     const owner = await resolveProfileOwner(account.id, body.target, reply);
     if (!owner) return;
 
+    // Older clients don't send a country: India.
+    const countryCode = body.countryCode === undefined ? HOME_COUNTRY : body.countryCode;
+    if (!isCountryCode(countryCode)) {
+      return fail(reply, AppStatus.BILLING_PROFILE_VALIDATION_FAILED, "Unknown country.", 400);
+    }
+    const india = countryCode === HOME_COUNTRY;
     const legalName = typeof body.legalName === "string" ? body.legalName.replace(/\s+/g, " ").trim() : "";
     if (!legalName || legalName.length > 200) {
       return fail(reply, AppStatus.BILLING_PROFILE_VALIDATION_FAILED, "Legal name is required (up to 200 characters).", 400);
     }
-    const gstin = typeof body.gstin === "string" && body.gstin.trim() ? body.gstin.trim().toUpperCase() : null;
+    // GSTIN and state only exist for Indian addresses.
+    const gstin = india && typeof body.gstin === "string" && body.gstin.trim() ? body.gstin.trim().toUpperCase() : null;
     if (gstin && !invoicesService.isValidGstin(gstin)) {
       return fail(reply, AppStatus.BILLING_PROFILE_VALIDATION_FAILED, "That GSTIN doesn't look right — it should be 15 characters, e.g. 27ABCDE1234F1Z5.", 400);
     }
     const address = typeof body.address === "string" && body.address.trim() ? body.address.trim().slice(0, 500) : null;
     const city = typeof body.city === "string" && body.city.trim() ? body.city.trim().slice(0, 100) : null;
     const postalCode =
-      typeof body.postalCode === "string" && body.postalCode.trim() ? body.postalCode.replace(/\s/g, "") : null;
-    if (postalCode && !/^[1-9]\d{5}$/.test(postalCode)) {
+      typeof body.postalCode === "string" && body.postalCode.trim()
+        ? india
+          ? body.postalCode.replace(/\s/g, "")
+          : body.postalCode.trim().toUpperCase()
+        : null;
+    if (postalCode && india && !/^[1-9]\d{5}$/.test(postalCode)) {
       return fail(reply, AppStatus.BILLING_PROFILE_VALIDATION_FAILED, "PIN code should be 6 digits.", 400);
     }
-    const stateCode = typeof body.stateCode === "string" && body.stateCode ? body.stateCode : null;
+    if (postalCode && !india && !/^[A-Z0-9][A-Z0-9 -]{1,10}[A-Z0-9]$/.test(postalCode)) {
+      return fail(reply, AppStatus.BILLING_PROFILE_VALIDATION_FAILED, "That postal code doesn't look right.", 400);
+    }
+    const stateCode = india && typeof body.stateCode === "string" && body.stateCode ? body.stateCode : null;
     if (stateCode && !invoicesService.stateName(stateCode)) {
       return fail(reply, AppStatus.BILLING_PROFILE_VALIDATION_FAILED, "Unknown state.", 400);
     }
@@ -574,6 +591,7 @@ export async function saveProfile(
     }
 
     const profile = await invoicesService.saveBillingProfile(owner, {
+      countryCode,
       legalName,
       gstin,
       address,
@@ -604,6 +622,7 @@ export async function listInvoices(request: FastifyRequest, reply: FastifyReply)
         issuedAt: row.issued_at.toISOString(),
         description: row.description,
         totalPaise: row.total_paise,
+        currency: row.currency,
         scope: row.org_id ? "org" : "personal",
       })),
     });

@@ -20,15 +20,15 @@ import * as usageService from "../../usage/usage.service";
 
 /** Runs on the gpt-oss-20b registry row: same key and plan access. */
 const KEY_REGISTRY_ID = "groq:gpt-oss-20b";
-const MODEL = "openai/gpt-oss-20b";
+export const SEARCH_MODEL = "openai/gpt-oss-20b";
 /** usage_events.provider for search calls (not a chat model, so not in provider_registry). */
 export const SEARCH_PROVIDER_ID = "groq:browser-search";
 const BASE_URL = "https://api.groq.com/openai/v1";
 /** groq.com/pricing, built-in tools (GPT-OSS): $5 / 1,000 searches, $1 / 1,000 pages visited. */
-const USD_PER_SEARCH = 0.005;
-const USD_PER_PAGE = 0.001;
+export const USD_PER_SEARCH = 0.005;
+export const USD_PER_PAGE = 0.001;
 /** Charged per search on the account's own Groq key (Groq bills them directly). */
-const BYOK_SEARCH_CREDITS = 1;
+export const BYOK_SEARCH_CREDITS = 1;
 const TIMEOUT_MS = 60_000;
 /** Groq's per-minute limits: wait this long (or its retry-after, if shorter) and retry once. */
 const RATE_LIMIT_RETRY_MS = 5_000;
@@ -125,7 +125,7 @@ export async function searchWeb(
 
   const create = () => client.chat.completions.create(
     {
-      model: MODEL,
+      model: SEARCH_MODEL,
       messages: [
         { role: "system", content: systemPrompt(depth) },
         { role: "user", content: `${context ? `Conversation so far (for context):\n${context}\n\n` : ""}Question: ${question}` },
@@ -169,7 +169,7 @@ export async function searchWeb(
     output_tokens: Math.max(u?.completion_tokens ?? 0, (u?.total_tokens ?? 0) - (u?.prompt_tokens ?? 0)),
     cached_input_tokens: u?.prompt_tokens_details?.cached_tokens ?? 0,
   };
-  const cost = nativeCost(MODEL, usage, startedAt) + searches * USD_PER_SEARCH + pages * USD_PER_PAGE;
+  const cost = nativeCost(SEARCH_MODEL, usage, startedAt) + searches * USD_PER_SEARCH + pages * USD_PER_PAGE;
   const byok = await hasOwnKey("groq", accountId);
 
   const { charged, usageEventId } = await usageService.recordSuccessAndDebit({

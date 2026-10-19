@@ -3,6 +3,8 @@ import { getPool } from "../../infrastructure/db/pool";
 import { logCaught } from "../../shared/utils/log";
 import { getBalance } from "../ledger/ledger.service";
 import { getSpendable } from "../ledger/spend.service";
+import type { BillingCurrency } from "./currency";
+import { currencyForOwner } from "./invoices.service";
 
 const PURCHASE_HISTORY_LIMIT = 20;
 
@@ -32,6 +34,8 @@ export type BillingSummary = {
   } | null;
   /** When the next recurring grant is due, if the plan has one. */
   nextGrantAt: string | null;
+  /** What this account pays in, from its own billing country (outside India → USD). */
+  currency: BillingCurrency;
   /** Most recent Razorpay subscription (Pro), excluding never-completed checkouts. */
   subscription: {
     planName: string;
@@ -43,7 +47,9 @@ export type BillingSummary = {
   purchases: {
     id: string;
     credits: number;
-    amountInrPaise: number;
+    /** In the minor unit of `currency` (paise / cents). */
+    amount: number;
+    currency: BillingCurrency;
     status: string;
     paymentId: string | null;
     createdAt: string;
@@ -68,7 +74,11 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
     const pool = getPool();
     // getBalance first: it applies any due recurring grant, which moves
     // last_recurring_grant_at — read the plan row after so nextGrantAt is current.
-    const [balance, spendable] = await Promise.all([getBalance(accountId), getSpendable(accountId)]);
+    const [balance, spendable, currency] = await Promise.all([
+      getBalance(accountId),
+      getSpendable(accountId),
+      currencyForOwner({ accountId }),
+    ]);
 
     const [planResult, subscriptionResult, purchasesResult]: [
       QueryResult<PlanRow>,
@@ -76,7 +86,8 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
       QueryResult<{
         id: string;
         credits: string;
-        amount_inr_paise: number;
+        amount: number;
+        currency: BillingCurrency;
         status: string;
         razorpay_payment_id: string | null;
         created_at: Date;
@@ -102,9 +113,9 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
          LIMIT 1`,
         [accountId]
       ),
-      // amount_usd_cents is a legacy (Stripe-era) name — Razorpay purchases store INR paise in it.
+      // amount_usd_cents is a legacy (Stripe-era) name — it holds the minor unit of `currency`.
       pool.query(
-        `SELECT id, credits, amount_usd_cents AS amount_inr_paise, status, razorpay_payment_id, created_at
+        `SELECT id, credits, amount_usd_cents AS amount, currency, status, razorpay_payment_id, created_at
          FROM credit_purchases
          WHERE account_id = $1 AND status <> 'pending'
          ORDER BY created_at DESC
@@ -138,6 +149,7 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
           }
         : null,
       balance,
+      currency,
       org:
         spendable.context.kind === "org"
           ? {
@@ -161,7 +173,8 @@ export async function getBillingSummary(accountId: string): Promise<BillingSumma
       purchases: purchasesResult.rows.map((row) => ({
         id: row.id,
         credits: Number(row.credits),
-        amountInrPaise: row.amount_inr_paise,
+        amount: row.amount,
+        currency: row.currency,
         status: row.status,
         paymentId: row.razorpay_payment_id,
         createdAt: row.created_at.toISOString(),
