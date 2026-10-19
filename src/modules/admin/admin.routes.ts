@@ -18,6 +18,7 @@ import * as plansController from "./admin-plans.controller";
 import * as featureCatalogController from "./admin-feature-catalog.controller";
 import * as impersonationController from "./admin-impersonation.controller";
 import * as salesController from "./admin-sales.controller";
+import * as emailDomainsController from "./admin-email-domains.controller";
 
 export function registerAdminRoutes(app: FastifyInstance): void {
   // Public probe — not enveloped, not auth-gated (AGENTS.md).
@@ -331,6 +332,31 @@ export function registerAdminRoutes(app: FastifyInstance): void {
       "/admin/sales-inquiries/:id",
       { preHandler: requireTicketManage },
       (request, reply) => salesController.updateInquiry(request, reply)
+    );
+
+    // Sign-up email domain rules (throwaway inbox blocking) — risk_queue.review.
+    const requireRiskReview = requirePermissionPreHandler(AdminPermission.RISK_QUEUE_REVIEW);
+
+    adminApp.get("/admin/email-domains", { preHandler: requireRiskReview }, (request, reply) =>
+      emailDomainsController.listRules(request, reply)
+    );
+
+    adminApp.get<{ Querystring: { email?: string } }>(
+      "/admin/email-domains/check",
+      { preHandler: requireRiskReview },
+      (request, reply) => emailDomainsController.checkEmail(request, reply)
+    );
+
+    adminApp.put<{ Params: { domain: string }; Body: { action?: string; note?: string | null } }>(
+      "/admin/email-domains/:domain",
+      { preHandler: requireRiskReview },
+      (request, reply) => emailDomainsController.saveRule(request, reply)
+    );
+
+    adminApp.delete<{ Params: { domain: string } }>(
+      "/admin/email-domains/:domain",
+      { preHandler: requireRiskReview },
+      (request, reply) => emailDomainsController.deleteRule(request, reply)
     );
   });
 }

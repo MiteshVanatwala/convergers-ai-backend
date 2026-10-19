@@ -12,6 +12,7 @@ import {
 } from "../../shared/utils/session-token";
 import { logCaught } from "../../shared/utils/log";
 import * as authService from "./auth.service";
+import { checkSignupEmail, emailDomain, isBlockedByAdminRule } from "./email-policy";
 import type { AccountRow, SessionAccount } from "./types";
 import * as plansService from "../plans/plans.service";
 import { getOrgPolicyForAccount, listPendingInvitesForEmail } from "../orgs/orgs.service";
@@ -99,6 +100,23 @@ export async function googleCallback(
       return;
     }
 
+    // Admin block rules stop existing accounts too.
+    if (await isBlockedByAdminRule(profile.email)) {
+      request.log.info({ domain: emailDomain(profile.email) }, "[auth.controller.googleCallback] domain blocked by admin rule");
+      await reply.redirect(loginRedirect(config.webOrigin, { error: "domain_blocked" }));
+      return;
+    }
+
+    // New sign-ups only. Google has verified the inbox, so only throwaway domains are blocked.
+    if (
+      !(await authService.accountExists(profile.email, profile.sub)) &&
+      (await checkSignupEmail(profile.email)) === "disposable"
+    ) {
+      request.log.info({ domain: emailDomain(profile.email) }, "[auth.controller.googleCallback] sign-up blocked");
+      await reply.redirect(loginRedirect(config.webOrigin, { error: "disposable_email" }));
+      return;
+    }
+
     const account = await authService.upsertGoogleAccount({
       googleId: profile.sub,
       email: profile.email,
@@ -111,7 +129,7 @@ export async function googleCallback(
       await reply.redirect(loginRedirect(config.webOrigin, { error: "suspended" }));
       return;
     }
-    if (account.isNew) sendWelcomeEmail({ email: account.email, name: account.name });
+    if (account.isNew) sendWelcomeEmail({ email: account.email, name: account.name }, account.signupCredits);
 
     const rawToken: string = newSessionToken();
     const ipAddress: string | null = clientIp(request);

@@ -6,9 +6,43 @@ import { hashToken } from "../../shared/utils/session-token";
 import { logCaught } from "../../shared/utils/log";
 import { ensureWallet, grantSignupCredits } from "../ledger/ledger.service";
 import { ensureFreePlanMembership } from "../plans/plans.service";
+import { isBlockedByAdminRule } from "./email-policy";
 import type { AccountRow, SessionAccount } from "./types";
 
 type AccountWithGoogleId = AccountRow & { google_id: string | null };
+/** `signupCredits`: trial credits granted now (0 for existing accounts and alias sign-ups). */
+type SignInAccount = AccountRow & { isNew: boolean; signupCredits: number };
+
+/**
+ * Locks this address's normalized form (Gmail dots and "+tag" removed — see
+ * normalize_signup_email() in db/email_domain_rules_v1.sql) until the
+ * transaction ends, and returns the earliest account that already has it.
+ * A sign-up that copies an existing account gets no free credits.
+ */
+async function findAliasTarget(client: PoolClient, email: string): Promise<string | null> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext(normalize_signup_email($1)))`, [email]);
+  const result: QueryResult<{ id: string }> = await client.query(
+    `SELECT id FROM accounts
+     WHERE normalized_email = normalize_signup_email($1)
+     ORDER BY created_at, id
+     LIMIT 1`,
+    [email]
+  );
+  return result.rows[0]?.id ?? null;
+}
+
+/** Signup credits for a new account; none when it is an alias of an existing one. */
+async function grantSignupCreditsUnlessAlias(
+  client: PoolClient,
+  accountId: string,
+  aliasOf: string | null
+): Promise<number> {
+  if (aliasOf) {
+    await ensureWallet(accountId, client);
+    return 0;
+  }
+  return (await grantSignupCredits(accountId, client)).granted;
+}
 
 export async function insertOAuthState(state: string, audience: string = "web"): Promise<void> {
   try {
@@ -47,15 +81,36 @@ export async function consumeOAuthState(state: string, audience: string = "web")
   }
 }
 
+/**
+ * True when signing in with this email (or Google id) would reuse an existing
+ * account rather than create one — sign-up-only checks skip these.
+ */
+export async function accountExists(email: string, googleId: string | null = null): Promise<boolean> {
+  try {
+    const pool = getPool();
+    const existsParams: [string, string | null] = [email, googleId];
+    const result: QueryResult<{ id: string }> = await pool.query(
+      `SELECT id FROM accounts
+       WHERE email = $1 OR ($2::text IS NOT NULL AND google_id = $2)
+       LIMIT 1`,
+      existsParams
+    );
+    return (result.rowCount ?? 0) > 0;
+  } catch (error: unknown) {
+    logCaught("auth.service.accountExists", error);
+    throw error;
+  }
+}
+
 export async function upsertGoogleAccount(input: {
   googleId: string;
   email: string;
   emailVerified: boolean;
   name: string | null;
   pictureUrl: string | null;
-}): Promise<AccountRow & { isNew: boolean }> {
+}): Promise<SignInAccount> {
   try {
-    return await withPoolTransaction(async (client: PoolClient): Promise<AccountRow & { isNew: boolean }> => {
+    return await withPoolTransaction(async (client: PoolClient): Promise<SignInAccount> => {
       const byGoogleParams: [string] = [input.googleId];
       const byGoogle: QueryResult<AccountRow> = await client.query<AccountRow>(
         `SELECT id, email, name, avatar_url, auth_provider, status, created_at
@@ -74,7 +129,8 @@ export async function upsertGoogleAccount(input: {
           `UPDATE accounts
            SET name = COALESCE($2, name),
                avatar_url = COALESCE($3, avatar_url),
-               email = $4,
+               email = $4::text,
+               normalized_email = normalize_signup_email($4::text),
                email_verified_at = CASE WHEN $5 THEN COALESCE(email_verified_at, now()) ELSE email_verified_at END,
                updated_at = now()
            WHERE id = $1
@@ -83,7 +139,7 @@ export async function upsertGoogleAccount(input: {
         );
         await ensureWallet(updated.rows[0].id, client);
         await ensureFreePlanMembership(updated.rows[0].id, client, "migration");
-        return { ...updated.rows[0], isNew: false };
+        return { ...updated.rows[0], isNew: false, signupCredits: 0 };
       }
 
       const byEmailParams: [string] = [input.email];
@@ -118,29 +174,31 @@ export async function upsertGoogleAccount(input: {
         );
         await ensureWallet(updated.rows[0].id, client);
         await ensureFreePlanMembership(updated.rows[0].id, client, "migration");
-        return { ...updated.rows[0], isNew: false };
+        return { ...updated.rows[0], isNew: false, signupCredits: 0 };
       }
 
-      const insertParams: [string, boolean, string, string | null, string | null] = [
+      const aliasOf: string | null = await findAliasTarget(client, input.email);
+      const insertParams: [string, boolean, string, string | null, string | null, string | null] = [
         input.email,
         input.emailVerified,
         input.googleId,
         input.name,
         input.pictureUrl,
+        aliasOf,
       ];
       const inserted: QueryResult<AccountRow> = await client.query<AccountRow>(
         `INSERT INTO accounts (
-           email, email_verified_at, auth_provider, google_id, name, avatar_url, status
+           email, normalized_email, alias_of_account_id, email_verified_at, auth_provider, google_id, name, avatar_url, status
          ) VALUES (
-           $1, CASE WHEN $2 THEN now() ELSE NULL END, 'google', $3, $4, $5, 'active'
+           $1::text, normalize_signup_email($1::text), $6, CASE WHEN $2 THEN now() ELSE NULL END, 'google', $3, $4, $5, 'active'
          )
          RETURNING id, email, name, avatar_url, auth_provider, status, created_at`,
         insertParams
       );
       const created: AccountRow = inserted.rows[0];
-      await grantSignupCredits(created.id, client);
+      const signupCredits: number = await grantSignupCreditsUnlessAlias(client, created.id, aliasOf);
       await ensureFreePlanMembership(created.id, client, "signup");
-      return { ...created, isNew: true };
+      return { ...created, isNew: true, signupCredits };
     });
   } catch (error: unknown) {
     logCaught("auth.service.upsertGoogleAccount", error);
@@ -154,9 +212,9 @@ export async function upsertGoogleAccount(input: {
  * credits, Free plan). An existing Google account with this email is reused,
  * so both sign-in methods land in one account.
  */
-export async function upsertEmailAccount(email: string): Promise<AccountRow & { isNew: boolean }> {
+export async function upsertEmailAccount(email: string): Promise<SignInAccount> {
   try {
-    return await withPoolTransaction(async (client: PoolClient): Promise<AccountRow & { isNew: boolean }> => {
+    return await withPoolTransaction(async (client: PoolClient): Promise<SignInAccount> => {
       const existing: QueryResult<AccountRow> = await client.query<AccountRow>(
         `UPDATE accounts
          SET email_verified_at = COALESCE(email_verified_at, now()), updated_at = now()
@@ -167,19 +225,20 @@ export async function upsertEmailAccount(email: string): Promise<AccountRow & { 
       if (existing.rows[0]) {
         await ensureWallet(existing.rows[0].id, client);
         await ensureFreePlanMembership(existing.rows[0].id, client, "migration");
-        return { ...existing.rows[0], isNew: false };
+        return { ...existing.rows[0], isNew: false, signupCredits: 0 };
       }
 
+      const aliasOf: string | null = await findAliasTarget(client, email);
       const inserted: QueryResult<AccountRow> = await client.query<AccountRow>(
-        `INSERT INTO accounts (email, email_verified_at, auth_provider, status)
-         VALUES ($1, now(), 'email', 'active')
+        `INSERT INTO accounts (email, normalized_email, alias_of_account_id, email_verified_at, auth_provider, status)
+         VALUES ($1::text, normalize_signup_email($1::text), $2, now(), 'email', 'active')
          RETURNING id, email, name, avatar_url, auth_provider, status, created_at`,
-        [email]
+        [email, aliasOf]
       );
       const created: AccountRow = inserted.rows[0];
-      await grantSignupCredits(created.id, client);
+      const signupCredits: number = await grantSignupCreditsUnlessAlias(client, created.id, aliasOf);
       await ensureFreePlanMembership(created.id, client, "signup");
-      return { ...created, isNew: true };
+      return { ...created, isNew: true, signupCredits };
     });
   } catch (error: unknown) {
     logCaught("auth.service.upsertEmailAccount", error);
@@ -282,7 +341,13 @@ export async function resolveSession(token: string): Promise<SessionAccount | nu
          AND a.status = 'active'`,
       resolveParams
     );
-    return result.rows[0] ?? null;
+    const account: SessionAccount | null = result.rows[0] ?? null;
+    // An admin block rule on the account's domain ends its sessions (admin impersonation still works).
+    if (account && !account.impersonated_by && (await isBlockedByAdminRule(account.email))) {
+      await revokeSession(token);
+      return null;
+    }
+    return account;
   } catch (error: unknown) {
     logCaught("auth.service.resolveSession", error);
     throw error;

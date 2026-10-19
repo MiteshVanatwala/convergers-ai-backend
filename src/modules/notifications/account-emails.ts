@@ -93,10 +93,9 @@ export async function sendLoginCodeEmail(email: string, code: string, ttlMinutes
   });
 }
 
-/** New account created (Google or email sign-up). */
-export function sendWelcomeEmail(recipient: Recipient): void {
+/** New account created (Google or email sign-up). `credits`: trial credits actually granted (0 for alias sign-ups). */
+export function sendWelcomeEmail(recipient: Recipient, credits: number = loadEnv().signupGrantCredits): void {
   fireAndForget("welcome", async () => {
-    const credits = loadEnv().signupGrantCredits;
     await deliver(recipient.email, "Welcome to Aikya", {
       greeting: `Hi ${firstName(recipient)},`,
       paragraphs: [

@@ -8,6 +8,7 @@ import { buildSessionCookie, newSessionToken } from "../../shared/utils/session-
 import { logCaught } from "../../shared/utils/log";
 import { sendLoginCodeEmail, sendWelcomeEmail } from "../notifications/account-emails";
 import * as authService from "./auth.service";
+import { checkSignupEmail, emailDomain, isBlockedByAdminRule } from "./email-policy";
 import * as emailLoginService from "./email-login.service";
 import { LOGIN_CODE_TTL_MINUTES } from "./email-login.service";
 
@@ -20,6 +21,8 @@ const MAX_SENDS_PER_HOUR = 5;
 // Per IP (in-process) — stops one client spraying many addresses or guesses.
 const IP_SENDS_PER_HOUR = 20;
 const IP_VERIFIES_PER_10_MIN = 30;
+
+const DOMAIN_BLOCKED_MESSAGE = "Sign-in with this email domain isn't allowed. Contact support if that seems wrong.";
 
 function clientIp(request: FastifyRequest): string | null {
   const forwardedFor = request.headers["x-forwarded-for"];
@@ -81,6 +84,28 @@ export async function startEmailLogin(
       return tooMany(reply, "Too many sign-in attempts. Try again later.", ipLimit.retryAfterSec);
     }
 
+    // Admin block rules stop existing accounts too.
+    if (await isBlockedByAdminRule(email)) {
+      request.log.info({ domain: emailDomain(email) }, "[auth.email-login.controller.startEmailLogin] domain blocked by admin rule");
+      return fail(reply, AppStatus.AUTH_EMAIL_DOMAIN_BLOCKED, DOMAIN_BLOCKED_MESSAGE, 403);
+    }
+
+    // New sign-ups only: block throwaway inboxes before spending an email on them.
+    if (!(await authService.accountExists(email))) {
+      const verdict = await checkSignupEmail(email);
+      if (verdict !== "ok") {
+        request.log.info({ domain: emailDomain(email), verdict }, "[auth.email-login.controller.startEmailLogin] sign-up blocked");
+        return fail(
+          reply,
+          AppStatus.AUTH_EMAIL_DOMAIN_BLOCKED,
+          verdict === "disposable"
+            ? "Temporary email addresses aren't supported. Please use your regular email."
+            : "That email domain can't receive mail. Check the address and try again.",
+          400
+        );
+      }
+    }
+
     const recent = await emailLoginService.getRecentCodeSends(email);
     if (recent.lastSentAt) {
       const waitSec = RESEND_COOLDOWN_SEC - (Date.now() - recent.lastSentAt.getTime()) / 1000;
@@ -127,6 +152,11 @@ export async function verifyEmailLogin(
       return tooMany(reply, "Too many attempts. Try again in a few minutes.", ipLimit.retryAfterSec);
     }
 
+    // A code sent before an admin blocked the domain must not still work.
+    if (await isBlockedByAdminRule(email)) {
+      return fail(reply, AppStatus.AUTH_EMAIL_DOMAIN_BLOCKED, DOMAIN_BLOCKED_MESSAGE, 403);
+    }
+
     const result = await emailLoginService.consumeLoginCode(email, codeMatches(code));
     if (result === "invalid") {
       return fail(reply, AppStatus.AUTH_EMAIL_CODE_INVALID, "That code isn't right. Check the email and try again.", 400);
@@ -147,7 +177,7 @@ export async function verifyEmailLogin(
     const userAgent = typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : null;
     await authService.createSession({ accountId: account.id, token, ip, userAgent });
     await authService.recordLogin(account.id, ip, userAgent);
-    if (account.isNew) sendWelcomeEmail({ email: account.email, name: account.name });
+    if (account.isNew) sendWelcomeEmail({ email: account.email, name: account.name }, account.signupCredits);
 
     reply.header("Set-Cookie", buildSessionCookie(token));
     request.log.info({ accountId: account.id, isNew: account.isNew }, "[auth.email-login.controller.verifyEmailLogin] success");

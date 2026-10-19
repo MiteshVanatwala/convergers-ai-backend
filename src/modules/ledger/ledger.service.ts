@@ -151,8 +151,10 @@ export async function applyDueRecurringGrant(accountId: string): Promise<void> {
       `SELECT p.recurring_grant_credits, p.recurring_grant_period_hours, w.last_recurring_grant_at
        FROM account_plans ap
        JOIN plans p ON p.id = ap.plan_id
+       JOIN accounts a ON a.id = ap.account_id
        LEFT JOIN credit_wallets w ON w.account_id = ap.account_id
-       WHERE ap.account_id = $1 AND ap.status = 'active'`,
+       WHERE ap.account_id = $1 AND ap.status = 'active'
+         AND a.alias_of_account_id IS NULL -- alias sign-ups (Gmail dots/+tag copies) get no free grants`,
       [accountId]
     );
     const row = precheck.rows[0];

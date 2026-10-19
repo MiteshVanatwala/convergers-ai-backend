@@ -16,6 +16,7 @@ import { LEDGER_REASONS } from "./credits.service";
 import type { LedgerReasonValue } from "../../config/ledger-reasons";
 import * as featuresService from "../plans/plan-features.service";
 import { FeatureCatalogError } from "../plans/plan-features.service";
+import { disposableEmailChecker } from "../auth/email-policy";
 
 /** Health stays a thin probe — not wrapped in the API envelope. */
 export async function health() {
@@ -116,8 +117,9 @@ export async function listUsers(
       order: orderRaw as AdminUserListOrder,
     });
 
+    const isDisposableEmail = await disposableEmailChecker();
     return ok(reply, AppStatus.ADMIN_USERS_RETRIEVED, {
-      items: result.rows.map(mapUserListItem),
+      items: result.rows.map((row) => ({ ...mapUserListItem(row), disposableEmail: isDisposableEmail(row.email) })),
       total: result.total,
       limit: result.limit,
       offset: result.offset,

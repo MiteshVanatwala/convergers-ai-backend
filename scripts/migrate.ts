@@ -126,6 +126,7 @@ const MIGRATIONS: Migration[] = [
   },
   { file: "multi_model_v1.sql", detect: table("answer_votes") },
   { file: "currency_v1.sql", detect: column("credit_purchases", "currency") },
+  { file: "email_domain_rules_v1.sql", detect: table("email_domain_rules") },
 ];
 
 const DB_DIR = join(__dirname, "..", "db");
