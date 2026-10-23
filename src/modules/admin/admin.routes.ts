@@ -139,6 +139,20 @@ export function registerAdminRoutes(app: FastifyInstance): void {
       adminController.softDeleteUser(request, reply)
     );
 
+    const requireSuspendAccount = requirePermissionPreHandler(AdminPermission.ACCOUNT_SUSPEND);
+
+    adminApp.post<{ Params: { id: string }; Body?: { reason?: unknown } | null }>(
+      "/admin/users/:id/block",
+      { preHandler: requireSuspendAccount },
+      (request, reply) => adminController.setUserBlocked(request, reply, true)
+    );
+
+    adminApp.post<{ Params: { id: string }; Body?: { reason?: unknown } | null }>(
+      "/admin/users/:id/unblock",
+      { preHandler: requireSuspendAccount },
+      (request, reply) => adminController.setUserBlocked(request, reply, false)
+    );
+
     adminApp.get<{ Params: { id: string } }>("/admin/users/:id/features", (request, reply) =>
       adminController.getUserFeatures(request, reply)
     );

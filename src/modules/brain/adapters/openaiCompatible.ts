@@ -71,8 +71,10 @@ export function createOpenAICompatibleAdapter(config: {
   providerLabel: string;
   /** The provider's reasoning control (reasoning.ts); omitted = always the model's default. */
   reasoning?: ReasoningControl;
+  /** Provider-specific body fields sent on every request (e.g. OpenRouter's `provider` preferences). */
+  extraBody?: Record<string, unknown>;
 }): ProviderAdapter {
-  const { id, model, baseURL, providerKeyId, providerLabel, reasoning } = config;
+  const { id, model, baseURL, providerKeyId, providerLabel, reasoning, extraBody } = config;
 
   function reasoningParams(request: RouteRequest): OpenAIReasoningParams {
     const effort = requestEffort(request);
@@ -96,6 +98,7 @@ export function createOpenAICompatibleAdapter(config: {
         messages: buildMessages(request),
         max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
         ...reasoningParams(request),
+        ...extraBody,
       });
 
       const content = response.choices[0]?.message?.content ?? "";
@@ -129,6 +132,7 @@ export function createOpenAICompatibleAdapter(config: {
             messages: buildMessages(request),
             max_tokens: outputTokenLimit(MAX_OUTPUT_TOKENS, request),
             ...reasoningParams(request),
+            ...extraBody,
             stream: true,
             stream_options: { include_usage: true },
           },

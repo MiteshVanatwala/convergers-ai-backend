@@ -234,6 +234,66 @@ export async function softDeleteUser(
   }
 }
 
+const BLOCK_REASON_MAX = 500;
+
+export async function setUserBlocked(
+  request: FastifyRequest<{ Params: { id: string }; Body?: { reason?: unknown } | null }>,
+  reply: FastifyReply,
+  blocked: boolean
+) {
+  try {
+    const { id } = request.params;
+    if (!UUID_RE.test(id)) {
+      return fail(reply, AppStatus.ADMIN_USER_BLOCK_VALIDATION_FAILED, "Invalid user id", 400);
+    }
+    const reasonRaw = request.body?.reason;
+    if (reasonRaw !== undefined && reasonRaw !== null && typeof reasonRaw !== "string") {
+      return fail(reply, AppStatus.ADMIN_USER_BLOCK_VALIDATION_FAILED, "reason must be text", 400);
+    }
+    const reason = typeof reasonRaw === "string" ? reasonRaw.trim() || null : null;
+    if (reason && reason.length > BLOCK_REASON_MAX) {
+      return fail(
+        reply,
+        AppStatus.ADMIN_USER_BLOCK_VALIDATION_FAILED,
+        `reason must be at most ${BLOCK_REASON_MAX} characters`,
+        400
+      );
+    }
+
+    const existing = await usersService.getUserById(id);
+    if (!existing) {
+      return fail(reply, AppStatus.ADMIN_USER_NOT_FOUND, "User not found", 404);
+    }
+    if (existing.status === "soft_deleted") {
+      return fail(
+        reply,
+        AppStatus.ADMIN_USER_BLOCK_VALIDATION_FAILED,
+        "Soft-deleted users cannot be blocked or unblocked",
+        400
+      );
+    }
+
+    const updated = await usersService.setUserBlocked(id, blocked, request.admin!.id, reason);
+    if (!updated) {
+      return fail(reply, AppStatus.ADMIN_USER_NOT_FOUND, "User not found", 404);
+    }
+    return ok(
+      reply,
+      blocked ? AppStatus.ADMIN_USER_BLOCKED : AppStatus.ADMIN_USER_UNBLOCKED,
+      mapUserDetail(updated)
+    );
+  } catch (error: unknown) {
+    logCaught("admin.controller.setUserBlocked", error);
+    request.log.error({ err: error }, "[admin.controller.setUserBlocked] failed");
+    return fail(
+      reply,
+      AppStatus.ADMIN_USER_BLOCK_FAILED,
+      blocked ? "Failed to block user" : "Failed to unblock user",
+      500
+    );
+  }
+}
+
 function failFromFeatureCatalogError(reply: FastifyReply, error: FeatureCatalogError) {
   switch (error.kind) {
     case "validation":

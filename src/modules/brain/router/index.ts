@@ -18,7 +18,16 @@ import { qwenAdapter } from "../adapters/qwen";
 import { gptOssAdapter, gptOss20bAdapter } from "../adapters/gptOss";
 import { geminiFlashAdapter, geminiFlashLiteAdapter, geminiProAdapter } from "../adapters/gemini";
 import { xaiAdapter, grok43Adapter } from "../adapters/xai";
-import { openrouterAdapter } from "../adapters/openrouter";
+import {
+  gemmaAdapter,
+  mimoFlashAdapter,
+  mimoProAdapter,
+  openrouterAdapter,
+  openrouterDeepseekFlashAdapter,
+  openrouterDeepseekProAdapter,
+  openrouterGlmAdapter,
+  qwenMaxOpenAdapter,
+} from "../adapters/openrouter";
 import { normalize } from "../normalizer";
 import { creditsForCost } from "../../ledger/ledger.service";
 import { getPool } from "../../../infrastructure/db/pool";
@@ -68,6 +77,13 @@ const ADAPTER_LOOKUP: Record<string, ProviderAdapter> = {
   [xaiAdapter.id]: xaiAdapter,
   [grok43Adapter.id]: grok43Adapter,
   [openrouterAdapter.id]: openrouterAdapter,
+  [mimoProAdapter.id]: mimoProAdapter,
+  [mimoFlashAdapter.id]: mimoFlashAdapter,
+  [openrouterDeepseekFlashAdapter.id]: openrouterDeepseekFlashAdapter,
+  [openrouterDeepseekProAdapter.id]: openrouterDeepseekProAdapter,
+  [openrouterGlmAdapter.id]: openrouterGlmAdapter,
+  [gemmaAdapter.id]: gemmaAdapter,
+  [qwenMaxOpenAdapter.id]: qwenMaxOpenAdapter,
 };
 
 const TASK_TYPES: TaskType[] = [

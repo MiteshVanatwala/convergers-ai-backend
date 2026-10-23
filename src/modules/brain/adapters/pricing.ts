@@ -45,8 +45,18 @@ export const PRICING: Record<string, ModelRate> = {
   // xAI Grok — https://docs.x.ai/developers/pricing (below 200K-token threshold)
   "grok-4.6": { inputPerMTok: 2.0, outputPerMTok: 6.0 },
   "grok-4.3": { inputPerMTok: 1.25, outputPerMTok: 2.5 },
-  // Meta Llama 3.3 70B via OpenRouter — https://openrouter.ai/meta-llama/llama-3.3-70b-instruct
+  // OpenRouter — https://openrouter.ai/{slug}. These are also the max_price sent with every request
+  // (openrouter.ts): the model maker's own rate, so no host is ever paid more than this. No cached
+  // rate — whether a host discounts cache hits varies, so prompts are billed at the full rate.
+  // Checked 2026-10-22 against GET /api/v1/models/{slug}/endpoints.
   "meta-llama/llama-3.3-70b-instruct": { inputPerMTok: 0.1, outputPerMTok: 0.32 },
+  "xiaomi/mimo-v2.6-pro": { inputPerMTok: 0.435, outputPerMTok: 0.87 },
+  "xiaomi/mimo-v2.6-flash": { inputPerMTok: 0.14, outputPerMTok: 0.28 },
+  "deepseek/deepseek-v4.1-flash-1017": { inputPerMTok: 0.3, outputPerMTok: 1.2 },
+  "deepseek/deepseek-v4-pro-0813": { inputPerMTok: 1.32, outputPerMTok: 3.96 },
+  "z-ai/glm-5.3": { inputPerMTok: 1.4, outputPerMTok: 4.4 },
+  "google/gemma-4-31b-it": { inputPerMTok: 0.2, outputPerMTok: 0.4 },
+  "qwen/qwen3.8-2.4t-a95b": { inputPerMTok: 2.0, outputPerMTok: 6.0 },
 };
 
 /** What a provider reports for one request. `input_tokens` is the WHOLE prompt, cached parts included. */

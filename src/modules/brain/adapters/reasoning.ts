@@ -18,6 +18,9 @@ import type { BrainRequest } from "./types";
  *             the <think> text out of the answer
  *   Anthropic `output_config.effort` low|medium|high|xhigh|max on Sonnet 5.5 / Opus 5.5
  *             (adaptive thinking is always on); Haiku 4.5 rejects it
+ *   OpenRouter https://openrouter.ai/docs/use-cases/reasoning-tokens
+ *             one `reasoning: {effort | enabled}` object for every model; the reasoning text
+ *             comes back separately, never inside the answer
  */
 
 /** Extra chat-completions body fields; spread into the request. */
@@ -25,6 +28,7 @@ export type OpenAIReasoningParams = {
   reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high";
   reasoning_format?: "hidden";
   thinking?: { type: "enabled" | "disabled" };
+  reasoning?: { effort: "low" | "medium" | "high" } | { enabled: false };
 };
 
 export type ReasoningControl = (effort: Effort) => OpenAIReasoningParams;
@@ -46,6 +50,17 @@ export const geminiReasoning: ReasoningControl = (effort) => {
 export const gptOssReasoning: ReasoningControl = (effort) => {
   if (effort === "quick") return { reasoning_effort: "low" };
   return effort === "deep" ? { reasoning_effort: "high" } : {};
+};
+
+export const openrouterReasoning: ReasoningControl = (effort) => {
+  if (effort === "quick") return { reasoning: { effort: "low" } };
+  return effort === "deep" ? { reasoning: { effort: "high" } } : {};
+};
+
+/** DeepSeek thinks at high effort by default here too, so quick turns it off and standard lowers it. */
+export const openrouterDeepseekReasoning: ReasoningControl = (effort) => {
+  if (effort === "quick") return { reasoning: { enabled: false } };
+  return { reasoning: { effort: effort === "deep" ? "high" : "low" } };
 };
 
 export const qwenReasoning: ReasoningControl = (effort) =>

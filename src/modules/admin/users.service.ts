@@ -1,6 +1,8 @@
 import type { QueryResult } from "pg";
 import { getPool } from "../../infrastructure/db/pool";
+import { withAdminTransaction } from "../../infrastructure/db/with-admin-transaction";
 import { logCaught } from "../../shared/utils/log";
+import { appendAdminAudit } from "./admin-audit.service";
 
 export type AccountStatus = "active" | "suspended" | "soft_deleted";
 
@@ -182,6 +184,61 @@ export async function updateUser(
     return getUserById(accountId);
   } catch (error: unknown) {
     logCaught("admin.users.service.updateUser", error);
+    throw error;
+  }
+}
+
+/**
+ * Block (suspended) or unblock (active) an account, audited. Blocking also revokes its open sessions —
+ * resolveSession already ignores non-active accounts, revoking keeps them dead after an unblock.
+ * Returns null when the account is missing or soft-deleted.
+ */
+export async function setUserBlocked(
+  accountId: string,
+  blocked: boolean,
+  actorId: string,
+  reason: string | null
+): Promise<AdminUserDetailRow | null> {
+  try {
+    const changed = await withAdminTransaction(actorId, async (client) => {
+      const updateResult: QueryResult<{ id: string; previous: string }> = await client.query(
+        `UPDATE accounts a
+         SET status = $2,
+             updated_at = now()
+         FROM accounts prev
+         WHERE a.id = $1
+           AND prev.id = a.id
+           AND a.status <> 'soft_deleted'
+         RETURNING a.id, prev.status AS previous`,
+        [accountId, blocked ? "suspended" : "active"]
+      );
+      const row = updateResult.rows[0];
+      if (!row) return false;
+      let revokedSessions = 0;
+      if (blocked) {
+        const revokeResult = await client.query(
+          `UPDATE sessions SET revoked_at = now()
+           WHERE account_id = $1 AND revoked_at IS NULL`,
+          [accountId]
+        );
+        revokedSessions = revokeResult.rowCount ?? 0;
+      }
+      await appendAdminAudit(
+        {
+          adminUserId: actorId,
+          action: blocked ? "account.blocked" : "account.unblocked",
+          targetType: "account",
+          targetId: accountId,
+          reason,
+          meta: { previousStatus: row.previous, revokedSessions },
+        },
+        client
+      );
+      return true;
+    });
+    return changed ? getUserById(accountId) : null;
+  } catch (error: unknown) {
+    logCaught("admin.users.service.setUserBlocked", error);
     throw error;
   }
 }

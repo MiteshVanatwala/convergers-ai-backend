@@ -127,6 +127,10 @@ const MIGRATIONS: Migration[] = [
   { file: "multi_model_v1.sql", detect: table("answer_votes") },
   { file: "currency_v1.sql", detect: column("credit_purchases", "currency") },
   { file: "email_domain_rules_v1.sql", detect: table("email_domain_rules") },
+  {
+    file: "openrouter_models_v1.sql",
+    detect: `SELECT EXISTS (SELECT 1 FROM provider_registry WHERE id = 'openrouter:mimo-v2.6-pro') AS applied`,
+  },
 ];
 
 const DB_DIR = join(__dirname, "..", "db");
